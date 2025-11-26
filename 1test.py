@@ -106,13 +106,10 @@ def fetch_stock_data(item):
         # 현재가 찾기 (상단 테이블)
         for df in dfs:
             if df.shape[1] >= 2 and ('현재가' in str(df.iloc[:, 0].values) or '현재가' in str(df.columns)):
-                 # 간단히 종가 정보가 있는 테이블이라고 가정
                  pass
         
-        # 좀 더 확실한 현재가 (FDR로 가져오는게 가장 확실하지만 속도를 위해 여기서 파싱 시도)
-        # 만약 크롤링 실패시 FDR로 대체
+        # 현재가 파싱
         try:
-             # 네이버 페이지 내 '현재가' text search
              match = re.search(r'blind">\s*([0-9,]+)\s*<', res.text)
              if match: current_price = to_float(match.group(1))
         except: pass
@@ -124,12 +121,10 @@ def fetch_stock_data(item):
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = [c[0] for c in df.columns]
                 
-                # 최근 결산일 기준 값 찾기 (데이터프레임 순회)
                 for idx, row in df.iterrows():
                     row_name = str(row.iloc[0])
                     vals = row.iloc[1:].tolist()
                     
-                    # 가장 최근의 유효한(0이 아닌) 값을 뒤에서부터 찾음
                     valid_val = 0.0
                     for v in reversed(vals):
                         v_float = to_float(v)
@@ -144,7 +139,7 @@ def fetch_stock_data(item):
                 
                 if eps > 0 and bps > 0: break
         
-        # 크롤링 실패 시 보완 (FDR로 가격 재확인)
+        # 크롤링 실패 시 보완
         if current_price == 0:
             df_price = fdr.DataReader(code, datetime.now().strftime('%Y-%m-%d'))
             if not df_price.empty: current_price = to_float(df_price['Close'].iloc[-1])
@@ -165,9 +160,8 @@ def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar):
     results = []
     total = len(target_list)
     
-    # max_workers=15 : 15개씩 동시에 처리 (속도 대폭 향상)
+    # max_workers=15 : 15개씩 동시에 처리
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-        # 작업 목록 생성
         futures = {executor.submit(fetch_stock_data, item): item for item in target_list}
         
         completed_count = 0
@@ -175,16 +169,12 @@ def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar):
             data = future.result()
             completed_count += 1
             
-            # 진행률 업데이트
             progress_bar.progress(min(completed_count / total, 1.0))
             if data:
                 status_text.text(f"⚡ [{completed_count}/{total}] {data['name']} 분석 완료")
                 
-                # 계산 로직
                 eps, bps = data['eps'], data['bps']
                 
-                # 데이터가 0이면 스킵하지 않고 일단 0으로 표시하되 경고 (또는 리스트 포함)
-                # 여기서는 데이터 있는 것만 계산
                 if eps == 0 and bps == 0: continue
 
                 roe = (eps / bps * 100) if bps > 0 else 0
@@ -257,15 +247,18 @@ mode = st.radio("분석 모드", ["🏆 시가총액 상위", "🔍 종목 검�
 target_list = [] # (Code, Name, Rank) 튜플 리스트
 
 if mode == "🏆 시가총액 상위":
-    if 'stock_count' not in st.session_state: st.session_state.stock_count = 50 # 기본값 줄임 (속도 체감 위해)
+    # [수정] 기본값 200으로 변경
+    if 'stock_count' not in st.session_state: st.session_state.stock_count = 200 
 
     def update_from_slider(): st.session_state.stock_count = st.session_state.slider_key
     def apply_manual_input(): st.session_state.stock_count = st.session_state.num_key
 
     c1, c2 = st.columns([3, 1])
     with c1:
-        st.slider("종목 수 조절", 10, 200, key='slider_key', value=st.session_state.stock_count, on_change=update_from_slider)
+        # [수정] 슬라이더 최대값 400으로 변경
+        st.slider("종목 수 조절", 10, 400, key='slider_key', value=st.session_state.stock_count, on_change=update_from_slider)
     with c2:
+        # [수정] 입력창 최대값 400으로 변경
         st.number_input("직접 입력", 10, 400, key='num_key', value=st.session_state.stock_count)
         if st.button("✅ 수치 적용", on_click=apply_manual_input): st.rerun()
 
@@ -279,7 +272,6 @@ elif mode == "🔍 종목 검색":
                 if res.empty: st.error("결과 없음")
                 else:
                     picks = st.multiselect("선택", res['Name'].tolist(), default=res['Name'].tolist()[:5])
-                    # 선택된 종목을 타겟 리스트 형태로 변환
                     selected = res[res['Name'].isin(picks)]
                     for idx, row in selected.iterrows():
                         target_list.append((str(row['Code']), row['Name'], 1))
@@ -289,7 +281,6 @@ elif mode == "🔍 종목 검색":
 st.divider()
 if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width=True):
     
-    # 시가총액 모드일 때 리스트 생성
     if mode == "🏆 시가총액 상위":
         with st.spinner("기초 데이터 준비 중..."):
             df_krx = fdr.StockListing('KRX')
@@ -347,19 +338,22 @@ if 'analysis_result' in st.session_state and not st.session_state['analysis_resu
     top = df.iloc[0]
     st.info(f"🥇 **1위: {top['종목명']}** (시총 {top['시총순위']}위) | 괴리율: {top['괴리율']}%")
 
+    # [수정] 스타일 함수: 기본 흰색, 조건부 파스텔
     def style_dataframe(row):
         styles = []
         for col in row.index:
-            color = '#BAA4D3'
+            color = 'white' # [수정] 기본 색상 흰색으로 변경
             weight = 'normal'
+            
             if col == '괴리율':
                 val = row['괴리율']
-                if val > 20: color = '#D47C94'; weight = 'bold'
-                elif val < 0: color = '#ABC4FF'; weight = 'bold'
+                if val > 20: color = '#D47C94'; weight = 'bold' # 파스텔 레드
+                elif val < 0: color = '#ABC4FF'; weight = 'bold' # 파스텔 블루
             elif col == '공포지수':
                 val = row['공포지수']
-                if val <= 30: color = '#D47C94'; weight = 'bold'
-                elif val >= 70: color = '#ABC4FF'; weight = 'bold'
+                if val <= 30: color = '#D47C94'; weight = 'bold' # 파스텔 레드
+                elif val >= 70: color = '#ABC4FF'; weight = 'bold' # 파스텔 블루
+            
             styles.append(f'color: {color}; font-weight: {weight}')
         return styles
 

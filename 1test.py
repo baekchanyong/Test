@@ -57,7 +57,13 @@ def to_float(val):
 # 이 함수는 한 번 실행되면 결과를 메모리에 저장해두어 속도를 높입니다.
 @st.cache_data
 def get_stock_listing():
+    # KRX 전체 데이터를 가져온 뒤 KOSPI만 필터링해야 Marcap 등 정보가 온전함
     df = fdr.StockListing('KRX')
+    
+    # [수정] KOSPI 종목만 필터링 (코스닥/코넥스 제외하여 네이버 코스피 순위와 일치시킴)
+    if 'Market' in df.columns:
+        df = df[df['Market'] == 'KOSPI']
+    
     # [수정] 미리 시가총액(Marcap) 순으로 정렬하고 전체 순위(ActualRank)를 매겨둡니다.
     if 'Marcap' in df.columns:
         df = df.sort_values(by='Marcap', ascending=False)
@@ -228,7 +234,7 @@ def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar, 
     return False
 
 # --- 메인 UI ---
-st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.0Ver</div>", unsafe_allow_html=True)
+st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.1Ver</div>", unsafe_allow_html=True)
 
 # 1. 설명서
 with st.expander("📘 **공지사항 및 산출공식**", expanded=True):
@@ -265,6 +271,9 @@ with st.expander("🛠️ **패치노트**", expanded=False):
     &nbsp; • 분석 필터링 추가: 맥쿼리인프라, SK리츠 등 제외<br>
     &nbsp; • 로딩 속도 최적화 적용 (캐싱)<br>
     &nbsp; • 시총순위: 검색 목록 기준이 아닌 '실제 코스피 순위'로 개선<br>
+    <br>
+    <b>(25.11.26) 1.1Ver : 긴급수정</b><br>
+    &nbsp; • 시총순위 오류 수정: 코스닥 종목이 섞여있던 문제를 수정하여 'KOSPI' 종목만 정확히 집계하도록 변경<br>
     </div>
     """, unsafe_allow_html=True)
 

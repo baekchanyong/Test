@@ -57,14 +57,16 @@ def to_float(val):
 # 이 함수는 한 번 실행되면 결과를 메모리에 저장해두어 속도를 높입니다.
 @st.cache_data
 def get_stock_listing():
-    # KRX 전체 데이터를 가져온 뒤 KOSPI만 필터링해야 Marcap 등 정보가 온전함
-    df = fdr.StockListing('KRX')
+    # [수정] 네이버 금융 시가총액 순위와 싱크를 맞추기 위해 소스를 'KRX' -> 'KOSPI'로 변경
+    # KRX는 전일 종가 기준이라 실시간(혹은 20분지연) 네이버 순위와 차이가 발생함
+    # 'KOSPI' 옵션은 네이버 금융 페이지를 크롤링하므로 순위가 일치함
+    df = fdr.StockListing('KOSPI')
     
-    # [수정] KOSPI 종목만 필터링 (코스닥/코넥스 제외하여 네이버 코스피 순위와 일치시킴)
-    if 'Market' in df.columns:
-        df = df[df['Market'] == 'KOSPI']
+    # FDR 'KOSPI' 소스는 컬럼명이 Symbol로 나오므로 Code로 통일
+    if 'Symbol' in df.columns:
+        df = df.rename(columns={'Symbol': 'Code'})
     
-    # [수정] 미리 시가총액(Marcap) 순으로 정렬하고 전체 순위(ActualRank)를 매겨둡니다.
+    # 시가총액 순 정렬 및 전체 순위(ActualRank) 부여
     if 'Marcap' in df.columns:
         df = df.sort_values(by='Marcap', ascending=False)
         df['ActualRank'] = range(1, len(df) + 1) # 1위부터 순위 부여
@@ -234,7 +236,7 @@ def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar, 
     return False
 
 # --- 메인 UI ---
-st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.1Ver</div>", unsafe_allow_html=True)
+st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.0Ver</div>", unsafe_allow_html=True)
 
 # 1. 설명서
 with st.expander("📘 **공지사항 및 산출공식**", expanded=True):
@@ -268,12 +270,8 @@ with st.expander("🛠️ **패치노트**", expanded=False):
     <div class='info-text'>
     
     <b>(25.11.26) 1.0Ver : 최초배포</b><br>
-    &nbsp; • 분석 필터링 추가: 맥쿼리인프라, SK리츠 등 제외<br>
-    &nbsp; • 로딩 속도 최적화 적용 (캐싱)<br>
-    &nbsp; • 시총순위: 검색 목록 기준이 아닌 '실제 코스피 순위'로 개선<br>
-    <br>
-    <b>(25.11.26) 1.1Ver : 긴급수정</b><br>
-    &nbsp; • 시총순위 오류 수정: 코스닥 종목이 섞여있던 문제를 수정하여 'KOSPI' 종목만 정확히 집계하도록 변경<br>
+    &nbsp; • 분석 제외종목 : 맥쿼리인프라, SK리츠, 제이알글로벌리츠, 롯데리츠, ESR켄달스퀘어리츠, 신한알파리츠, 맵스리얼티1, 이리츠코크렙, 코람코에너지리츠<br>
+    &nbsp;   - 일반제조업과 회계방식차이로 인하여 과도하게 저평가되는 종목들 제외<br>
     </div>
     """, unsafe_allow_html=True)
 

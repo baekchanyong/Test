@@ -13,16 +13,16 @@ import concurrent.futures # 병렬 처리를 위한 라이브러리
 my_password = "1478"
 
 # 설정: 페이지 기본 구성
-st.set_page_config(page_title="V55 가치투자 분석기", page_icon="🎨", layout="wide")
+st.set_page_config(page_title="KOSPI 분석기", page_icon="🎨", layout="wide")
 
 # 화면에 비밀번호 입력창을 만듭니다.
 password_input = st.text_input("비밀번호를 입력하세요", type="password")
 
 if password_input != my_password:
-    st.error("비밀번호가 틀렸거나 입력되지 않았습니다. 주인에게 물어보세요")
+    st.error("비밀번호를 입력하고 엔터를 누르면 실행됩니다.")
     st.stop()
 
-st.write("🎉 Good Luck!")
+st.write("🎉 Made By 찬용")
 # --- [비밀번호 설정 구간 끝] ---
 
 
@@ -38,7 +38,7 @@ st.markdown("""
         .responsive-header { font-size: 1.5rem; }
     }
     .info-text { font-size: 1rem; line-height: 1.6; }
-    .pastel-blue { color: #ABC4FF; font-weight: bold; }
+    .pastel-blue { color: #5C7CFA; font-weight: bold; } /* 라이트모드 가독성을 위해 조금 더 진한 파스텔 블루 */
     .pastel-red { color: #D47C94; font-weight: bold; }
     @media (max-width: 600px) { .info-text { font-size: 0.9rem; } }
 </style>
@@ -52,6 +52,19 @@ def to_float(val):
         clean_val = re.sub(r'[(),%]', '', str(val))
         return float(clean_val)
     except: return 0.0
+
+# --- [캐싱 적용] 종목 리스트 로딩 최적화 ---
+# 이 함수는 한 번 실행되면 결과를 메모리에 저장해두어 속도를 높입니다.
+@st.cache_data
+def get_stock_listing():
+    df = fdr.StockListing('KRX')
+    # [수정] 미리 시가총액(Marcap) 순으로 정렬하고 전체 순위(ActualRank)를 매겨둡니다.
+    if 'Marcap' in df.columns:
+        df = df.sort_values(by='Marcap', ascending=False)
+        df['ActualRank'] = range(1, len(df) + 1) # 1위부터 순위 부여
+    else:
+        df['ActualRank'] = 0
+    return df
 
 # --- [금리] 한국은행 기준금리 ---
 def get_bok_base_rate():
@@ -97,16 +110,15 @@ def fetch_stock_data(item):
     try:
         # 1. 네이버 금융에서 EPS, BPS, 현재가 크롤링
         url = f"https://finance.naver.com/item/main.naver?code={code}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=3)
+        # 헤더를 추가하여 봇 탐지 회피 확률 높임
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Referer': 'https://finance.naver.com/'
+        }
+        res = requests.get(url, headers=headers, timeout=5) 
         dfs = pd.read_html(res.text, encoding='cp949')
         
         eps, bps, current_price = 0.0, 0.0, 0.0
-        
-        # 현재가 찾기 (상단 테이블)
-        for df in dfs:
-            if df.shape[1] >= 2 and ('현재가' in str(df.iloc[:, 0].values) or '현재가' in str(df.columns)):
-                 pass
         
         # 현재가 파싱
         try:
@@ -153,15 +165,20 @@ def fetch_stock_data(item):
             'fg_score': fg_score
         }
     except Exception as e:
-        return None
+        # 에러가 나도 기본값 반환
+        return {
+            'code': code, 'name': name, 'rank': rank,
+            'price': 0, 'eps': 0, 'bps': 0,
+            'fg_score': 50
+        }
 
-# --- 분석 실행 (Thread Pool 사용) ---
-def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar):
+# --- 분석 실행 (Thread Pool + Worker Count 적용) ---
+def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar, worker_count):
     results = []
     total = len(target_list)
     
-    # max_workers=15 : 15개씩 동시에 처리
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    # [수정] 사용자가 선택한 worker_count 적용
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {executor.submit(fetch_stock_data, item): item for item in target_list}
         
         completed_count = 0
@@ -170,12 +187,12 @@ def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar):
             completed_count += 1
             
             progress_bar.progress(min(completed_count / total, 1.0))
+            
             if data:
                 status_text.text(f"⚡ [{completed_count}/{total}] {data['name']} 분석 완료")
                 
                 eps, bps = data['eps'], data['bps']
-                
-                if eps == 0 and bps == 0: continue
+                price = data['price']
 
                 roe = (eps / bps * 100) if bps > 0 else 0
                 
@@ -187,14 +204,14 @@ def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar):
                 fair_price = base_fair * sentiment
                 
                 gap = 0
-                if data['price'] > 0:
-                    gap = (fair_price - data['price']) / data['price'] * 100
+                if price > 0:
+                    gap = (fair_price - price) / price * 100
                 
                 results.append({
                     '종목코드': data['code'],
                     '종목명': data['name'],
                     '시총순위': data['rank'],
-                    '현재가': round(data['price'], 0),
+                    '현재가': round(price, 0),
                     '적정주가': round(fair_price, 0),
                     '괴리율': round(gap, 2),
                     '공포지수': round(data['fg_score'], 1),
@@ -205,24 +222,29 @@ def run_analysis_parallel(target_list, applied_rate, status_text, progress_bar):
 
     progress_bar.empty()
     if results:
+        # st.session_state는 메모리에만 저장되며, 브라우저를 닫으면 사라집니다 (파일 생성 X)
         st.session_state['analysis_result'] = pd.DataFrame(results)
         return True
     return False
 
 # --- 메인 UI ---
-st.markdown("<div class='responsive-header'>⚖️ V55 가치투자 분석기 (Parallel)</div>", unsafe_allow_html=True)
+st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.0Ver</div>", unsafe_allow_html=True)
 
 # 1. 설명서
-with st.expander("📘 **[필독] 산출 공식 및 원리**", expanded=True):
+with st.expander("📘 **공지사항 및 산출공식**", expanded=True):
     st.markdown("""
     <div class='info-text'>
-    <b>1. 적정주가 (수익중심 모델)</b><br>
+
+    <span class='pastel-blue'>공지사항</span><br>
+    <span class='pastel-red'># 적정주가는 절대적인 값보다, 상대적으로 봐야됨</span><br>
+    <span class='pastel-red'># 괴리율 높고,공포지수 낮을수록 매수대상으로 판단</span><br>
+    <br><br>
+
+    <span class='pastel-blue'>산출공식</span><br>
+    <b>1. 적정주가(수익중심 모델)</b><br>
     &nbsp; • <b>수익가치(70%):</b> (EPS ÷ 한국은행 기준금리)<br>
     &nbsp; • <b>자산가치(30%):</b> BPS<br>
     &nbsp; • <b>최종:</b> (수익가치×0.7 + 자산가치×0.3) × 심리보정<br><br>
-    
-    <span class='pastel-blue'>파스텔 블루 입력</span><br>
-    <span class='pastel-red'>파스텔 레드 입력</span><br><br>
     
     <b>2. 공포탐욕지수 (주봉 기준)</b><br>
     &nbsp; • <b>구성:</b> RSI(14주) 50% + 이격도(20주) 50%<br>
@@ -236,18 +258,42 @@ with st.expander("📘 **[필독] 산출 공식 및 원리**", expanded=True):
 
 # 2. 패치노트
 with st.expander("🛠️ **패치노트**", expanded=False):
-    st.markdown("내용")
+    st.markdown("""
+    <div class='info-text'>
+    
+    <b>(25.11.26) 1.0Ver : 최초배포</b><br>
+    &nbsp; • 분석 필터링 추가: 맥쿼리인프라, SK리츠 등 제외<br>
+    &nbsp; • 로딩 속도 최적화 적용 (캐싱)<br>
+    &nbsp; • 시총순위: 검색 목록 기준이 아닌 '실제 코스피 순위'로 개선<br>
+    </div>
+    """, unsafe_allow_html=True)
 
 st.divider()
 
 # --- 1. 설정 ---
 st.header("1. 분석 설정")
 
+# [추가] 분석 속도 선택 옵션
+speed_option = st.radio(
+    "분석 속도 설정",
+    ["🚀 빠른 분석 (데이터 15개씩 / 누락 가능성 있음)", "⚖️ 보통 분석 (데이터 8개씩 / 권장)", "🐢 느린 분석 (데이터 2개씩 / 매우 안정적)"],
+    index=1 # 기본값: 보통 분석
+)
+
+# 선택된 옵션에 따라 worker_count 설정
+if "빠른" in speed_option:
+    worker_count = 15
+elif "보통" in speed_option:
+    worker_count = 8
+else:
+    worker_count = 2
+
+st.divider()
+
 mode = st.radio("분석 모드", ["🏆 시가총액 상위", "🔍 종목 검색"], horizontal=True)
-target_list = [] # (Code, Name, Rank) 튜플 리스트
+target_list = [] 
 
 if mode == "🏆 시가총액 상위":
-    # [수정] 기본값 200으로 변경
     if 'stock_count' not in st.session_state: st.session_state.stock_count = 200 
 
     def update_from_slider(): st.session_state.stock_count = st.session_state.slider_key
@@ -255,10 +301,8 @@ if mode == "🏆 시가총액 상위":
 
     c1, c2 = st.columns([3, 1])
     with c1:
-        # [수정] 슬라이더 최대값 400으로 변경
         st.slider("종목 수 조절", 10, 400, key='slider_key', value=st.session_state.stock_count, on_change=update_from_slider)
     with c2:
-        # [수정] 입력창 최대값 400으로 변경
         st.number_input("직접 입력", 10, 400, key='num_key', value=st.session_state.stock_count)
         if st.button("✅ 수치 적용", on_click=apply_manual_input): st.rerun()
 
@@ -267,14 +311,17 @@ elif mode == "🔍 종목 검색":
     if query:
         try:
             with st.spinner("목록 검색 중..."):
-                df_krx = fdr.StockListing('KRX')
+                # [수정] 캐싱된 함수 사용
+                df_krx = get_stock_listing()
                 res = df_krx[df_krx['Name'].str.contains(query, case=False)]
                 if res.empty: st.error("결과 없음")
                 else:
                     picks = st.multiselect("선택", res['Name'].tolist(), default=res['Name'].tolist()[:5])
                     selected = res[res['Name'].isin(picks)]
                     for idx, row in selected.iterrows():
-                        target_list.append((str(row['Code']), row['Name'], 1))
+                        # [수정] 실제 순위(ActualRank)를 사용하도록 변경
+                        rank_val = row['ActualRank'] if 'ActualRank' in row else 0
+                        target_list.append((str(row['Code']), row['Name'], rank_val))
         except: st.error("오류 발생")
 
 # --- 2. 실행 ---
@@ -283,14 +330,28 @@ if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width
     
     if mode == "🏆 시가총액 상위":
         with st.spinner("기초 데이터 준비 중..."):
-            df_krx = fdr.StockListing('KRX')
-            if 'Marcap' in df_krx.columns:
-                df_krx = df_krx.sort_values(by='Marcap', ascending=False)
+            # [수정] 캐싱된 함수 사용
+            df_krx = get_stock_listing()
+            # 이미 get_stock_listing에서 정렬과 ActualRank 생성이 완료되어 있음
             
             top_n = df_krx.head(st.session_state.stock_count)
             target_list = []
+            
+            # [수정] 필터링 로직 (리츠/인프라 등 제외)
+            skipped_count = 0
             for i, (idx, row) in enumerate(top_n.iterrows()):
-                target_list.append((str(row['Code']), row['Name'], i+1))
+                name = row['Name']
+                # 제외할 종목 리스트: S-RIM/EPS 분석이 맞지 않는 부동산/인프라 펀드 성격의 종목들
+                if name in ["맥쿼리인프라", "SK리츠", "제이알글로벌리츠", "롯데리츠", "ESR켄달스퀘어리츠", "신한알파리츠", "맵스리얼티1", "이리츠코크렙", "코람코에너지리츠"]:
+                    skipped_count += 1
+                    continue
+                
+                # [수정] 인덱스(i+1) 대신 실제 순위(ActualRank) 사용
+                rank_val = row['ActualRank'] if 'ActualRank' in row else i+1
+                target_list.append((str(row['Code']), name, rank_val))
+            
+            if skipped_count > 0:
+                st.toast(f"ℹ️ 리츠/인프라 종목 {skipped_count}개는 분석 특성상 자동 제외되었습니다.")
     
     if not target_list:
         st.warning("분석할 종목이 없습니다.")
@@ -302,11 +363,12 @@ if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width
     bok_rate = get_bok_base_rate()
     applied_rate = bok_rate if bok_rate else 3.25
     
-    status_box.success(f"✅ 기준금리 {applied_rate}% | 병렬 분석 시작...")
+    status_box.success(f"✅ 기준금리 {applied_rate}% | {speed_option} 모드로 시작합니다...")
     time.sleep(0.5)
     
     p_bar = st.progress(0)
-    is_success = run_analysis_parallel(target_list, applied_rate, status_box, p_bar)
+    # worker_count 파라미터 전달
+    is_success = run_analysis_parallel(target_list, applied_rate, status_box, p_bar, worker_count)
     
     if is_success:
         status_box.success(f"✅ 분석 완료!")
@@ -338,23 +400,30 @@ if 'analysis_result' in st.session_state and not st.session_state['analysis_resu
     top = df.iloc[0]
     st.info(f"🥇 **1위: {top['종목명']}** (시총 {top['시총순위']}위) | 괴리율: {top['괴리율']}%")
 
-    # [수정] 스타일 함수: 기본 흰색, 조건부 파스텔
+    # [수정] 테이블 스타일: 강제 배경색 제거 (시스템 테마 자동 반영)
     def style_dataframe(row):
         styles = []
         for col in row.index:
-            color = 'white' # [수정] 기본 색상 흰색으로 변경
-            weight = 'normal'
+            style = '' # 기본값은 빈 문자열 -> Streamlit 기본 테마 색상(자동) 적용
             
             if col == '괴리율':
                 val = row['괴리율']
-                if val > 20: color = '#D47C94'; weight = 'bold' # 파스텔 레드
-                elif val < 0: color = '#ABC4FF'; weight = 'bold' # 파스텔 블루
+                if val > 20: 
+                    # 저평가 -> 파스텔 레드
+                    style = 'color: #D47C94; font-weight: bold;' 
+                elif val < 0: 
+                    # 고평가 -> 파스텔 블루 (흰 배경에서도 보이게 조금 더 진한 색 사용)
+                    style = 'color: #5C7CFA; font-weight: bold;' 
             elif col == '공포지수':
                 val = row['공포지수']
-                if val <= 30: color = '#D47C94'; weight = 'bold' # 파스텔 레드
-                elif val >= 70: color = '#ABC4FF'; weight = 'bold' # 파스텔 블루
+                if val <= 30: 
+                    # 공포 -> 파스텔 레드
+                    style = 'color: #D47C94; font-weight: bold;'
+                elif val >= 70: 
+                    # 탐욕 -> 파스텔 블루
+                    style = 'color: #5C7CFA; font-weight: bold;'
             
-            styles.append(f'color: {color}; font-weight: {weight}')
+            styles.append(style)
         return styles
 
     st.dataframe(

@@ -32,9 +32,7 @@ with tab1:
     c2 = st.checkbox("2. (월봉) 이번 달 캔들이 양봉(+) 상태인가?", value=all_c_group1)
     c3 = st.checkbox("3. (주봉) 이번 주 고가가 지난주 고가보다 높은가?", value=all_c_group1)
     c4 = st.checkbox("4. (주봉) 이번 주 저가가 지난주 저가보다 높은가?", value=all_c_group1)
-    
-    # [수정] 전체선택(all_c_group1)과 연동되도록 value 설정
-    c_rsi = st.checkbox("RSI(14) 지표가 70 이하인가? (과열 아님)", value=all_c_group1)
+    c_rsi = st.checkbox("RSI(14) 지표가 70 이하인가?", value=all_c_group1)
 
 # [Tab 2] 이동평균선
 with tab2:
@@ -50,9 +48,7 @@ with tab2:
         c9 = st.checkbox("9. (일봉) 5일선이 상승 중이거나 평평한가?", value=all_c_group2)
         c10 = st.checkbox("10. (일봉) 10일선이 상승 중인가?", value=all_c_group2)
         c11 = st.checkbox("11. (일봉) 20일선이 상승 중인가?", value=all_c_group2)
-    
-    # [수정] 전체선택(all_c_group2)과 연동되도록 value 설정
-    c_ma5_high = st.checkbox("(일봉) 5일선이 전고점(최근 60일 내 최고치)을 돌파했는가?", value=all_c_group2)
+    c_ma5_high = st.checkbox("(일봉) 5일선이 전고점을 돌파했는가?(최근60일)", value=all_c_group2)
 
 # [Tab 3] 재무/기타
 with tab3:

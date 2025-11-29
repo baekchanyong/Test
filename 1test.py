@@ -26,18 +26,19 @@ tab1, tab2, tab3 = st.tabs(["📊 차트/캔들", "📈 이동평균선", "💰 
 
 # [Tab 1] 캔들/패턴
 with tab1:
-    all_c_group1 = st.checkbox("전체선택/해제", value=True, key="g1")
+    # [수정] 색상 변경 및 전체 선택 기능 강화
+    all_c_group1 = st.checkbox("✅ :blue[**전체선택/해제**]", value=True, key="g1")
     
     c2 = st.checkbox("2. (월봉) 이번 달 캔들이 양봉(+) 상태인가?", value=all_c_group1)
     c3 = st.checkbox("3. (주봉) 이번 주 고가가 지난주 고가보다 높은가?", value=all_c_group1)
     c4 = st.checkbox("4. (주봉) 이번 주 저가가 지난주 저가보다 높은가?", value=all_c_group1)
-    st.markdown("---")
-    # [추가 요청 1] RSI 조건
-    c_rsi = st.checkbox("RSI(14) 지표가 70 이하인가? (과열 아님)", value=False)
+    # [수정] 구분선 제거 및 전체선택 연동
+    c_rsi = st.checkbox("RSI(14) 지표가 70 이하인가? (과열 아님)", value=all_c_group1)
 
 # [Tab 2] 이동평균선
 with tab2:
-    all_c_group2 = st.checkbox("전체선택/해제", value=True, key="g2")
+    # [수정] 색상 변경
+    all_c_group2 = st.checkbox("✅ :blue[**전체선택/해제**]", value=True, key="g2")
 
     col_ma1, col_ma2 = st.columns(2)
     with col_ma1:
@@ -50,13 +51,13 @@ with tab2:
         c10 = st.checkbox("10. (일봉) 10일선이 상승 중인가?", value=all_c_group2)
         c11 = st.checkbox("11. (일봉) 20일선이 상승 중인가?", value=all_c_group2)
     
-    st.markdown("---")
-    # [추가 요청 2] 5일선 전고점 돌파
-    c_ma5_high = st.checkbox("(일봉) 5일선이 전고점(최근 60일 내 최고치)을 돌파했는가?", value=False)
+    # [수정] 구분선 제거 및 전체선택 연동 (컬럼 밖 아래쪽에 배치)
+    c_ma5_high = st.checkbox("(일봉) 5일선이 전고점(최근 60일 내 최고치)을 돌파했는가?", value=all_c_group2)
 
 # [Tab 3] 재무/기타
 with tab3:
-    all_c_group3 = st.checkbox("전체선택/해제", value=True, key="g3")
+    # [수정] 색상 변경 (통일성 유지)
+    all_c_group3 = st.checkbox("✅ :blue[**전체선택/해제**]", value=True, key="g3")
 
     st.markdown("종목 필터 및 수급")
     c1 = st.checkbox("1. 위험 종목 제외 (관리/환기/스팩/ETF/ETN/초저유동성 등)", value=all_c_group3)
@@ -165,7 +166,7 @@ def analyze_stock(stock_info):
     if c3 and (curr_week['High'] <= prev_week['High']): return None
     if c4 and (curr_week['Low'] <= prev_week['Low']): return None
 
-    # [추가] RSI 70 이하 조건
+    # RSI 70 이하 조건
     if c_rsi:
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -201,19 +202,15 @@ def analyze_stock(stock_info):
     if c10 and not (c_ma10 > p_ma10): return None
     if c11 and not (c_ma20 > p_ma20): return None
     
-    # [추가] 5일선 전고점 돌파 조건 (최근 60일 기준)
+    # 5일선 전고점 돌파 조건
     if c_ma5_high:
-        # 오늘을 제외한 최근 60일간의 5일선 최고값 계산
-        # 데이터가 60개보다 적으면 전체 기간으로 계산
         lookback = 60
         if len(ma5) > lookback:
-            past_ma5 = ma5.iloc[-(lookback+1):-1] # 오늘 제외
+            past_ma5 = ma5.iloc[-(lookback+1):-1]
         else:
             past_ma5 = ma5.iloc[:-1]
             
         prev_max_ma5 = past_ma5.max()
-        
-        # 오늘의 5일선이 과거 최고치보다 커야 함
         if c_ma5 <= prev_max_ma5: return None
 
     # 거래대금 조건

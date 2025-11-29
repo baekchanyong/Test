@@ -7,5 +7,5 @@ plotly
 requests
 lxml
 html5lib
-
 beautifulsoup4
+yfinance

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import concurrent.futures
 
 # --- [비밀번호 설정 구간 시작] ---
-my_password = "1414"
+my_password = "1478"
 
 st.set_page_config(page_title="KOSPI 분석기", page_icon="🎨", layout="wide")
 
@@ -256,9 +256,9 @@ def run_analysis_parallel(target_list, status_text, progress_bar, worker_count):
     return False
 
 # --- 메인 UI ---
-st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.1Ver</div>", unsafe_allow_html=True)
+st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.0Ver</div>", unsafe_allow_html=True)
 
-# 1. 설명서 (수정됨)
+# 1. 설명서
 with st.expander("📘 **공지사항 & 산출공식**", expanded=True):
     st.markdown("""
     <div class='info-text'>
@@ -268,7 +268,6 @@ with st.expander("📘 **공지사항 & 산출공식**", expanded=True):
     
     <b>2. 부채 과다 페널티 (부채비율 100% 초과)</b><br>
     &nbsp; • 적정주가 = (EPS × 10) + BPS - <b>[(총부채 - 총자본) ÷ 주식수]</b><br>
-    &nbsp; <span class='pastel-red'>* 초과된 부채만큼 주당 가치를 차감하여 보수적으로 산정합니다.</span><br><br>
 
     <span class='pastel-blue'>데이터 기준</span><br>
     &nbsp; • <b>과년도 적정주가:</b> 직전년도 확정 실적 기준<br>
@@ -277,7 +276,7 @@ with st.expander("📘 **공지사항 & 산출공식**", expanded=True):
     </div>
     """, unsafe_allow_html=True)
 
-# 2. 패치노트 (원복됨)
+# 2. 패치노트
 with st.expander("🛠️ **패치노트**", expanded=False):
     st.markdown("""
     <div class='info-text'>
@@ -308,7 +307,7 @@ worker_count = 15 if "빠른" in speed_option else (8 if "보통" in speed_optio
 
 st.divider()
 
-# [수정] 분석 모드 선택 (검색 기능 추가)
+# 분석 모드 선택
 mode = st.radio("분석 모드 선택", ["🏆 시가총액 상위 종목 분석", "🔍 특정 종목 검색/추천 분석"], horizontal=True)
 
 target_list = [] 
@@ -328,44 +327,73 @@ if mode == "🏆 시가총액 상위 종목 분석":
         if st.button("✅ 수치 적용", on_click=apply_manual_input): st.rerun()
 
 elif mode == "🔍 특정 종목 검색/추천 분석":
-    search_query = st.text_input("분석하고 싶은 종목명을 입력하세요 (예: 삼성, 현대, 카카오)", placeholder="종목명 입력 후 Enter")
+    # [수정] Session State를 활용하여 검색 목록 유지 (장바구니 기능)
+    if 'search_basket' not in st.session_state:
+        st.session_state.search_basket = []
+
+    col_search, col_btn = st.columns([4, 1])
+    with col_search:
+        search_query = st.text_input("종목명 검색", placeholder="예: 삼성, 현대, 네이버")
     
+    # 검색 로직
     if search_query:
-        # 전체 리스트 가져오기
-        with st.spinner("종목 리스트 검색 중..."):
-            try:
+        try:
+            with st.spinner("검색 중..."):
                 df_krx = get_stock_listing()
-                # 검색 로직 (포함 검색)
                 search_results = df_krx[df_krx['Name'].str.contains(search_query, case=False)]
                 
                 if search_results.empty:
-                    st.error(f"❌ '{search_query}'에 대한 검색 결과가 없습니다.")
-                    st.info("💡 팁: 정확한 종목명이 기억나지 않는다면, 이름의 일부만 입력해보세요 (예: '삼성' -> '삼성전자', '삼성생명')")
+                    st.error(f"❌ '{search_query}' 검색 결과가 없습니다.")
                 else:
-                    st.success(f"🔎 총 {len(search_results)}개의 종목을 찾았습니다.")
-                    # 멀티 셀렉트로 선택하게 함
-                    selected_stocks_names = st.multiselect(
-                        "분석할 종목을 선택해주세요 (복수 선택 가능)",
-                        search_results['Name'].tolist(),
-                        default=search_results['Name'].tolist()[:5] # 상위 5개 기본 선택
-                    )
+                    # 검색 결과 보여주고 선택하게 함
+                    search_options = search_results['Name'].tolist()
+                    selected_to_add = st.multiselect(f"'{search_query}' 검색 결과 (추가할 종목 선택)", search_options)
                     
-                    # 선택된 종목들로 타겟 리스트 구성
-                    selected_rows = search_results[search_results['Name'].isin(selected_stocks_names)]
-                    
-                    for idx, row in selected_rows.iterrows():
-                        rank_val = row['ActualRank'] if 'ActualRank' in row else 0
-                        shares = row['Shares'] if 'Shares' in row else 0
-                        target_list.append((str(row['Code']), row['Name'], rank_val, shares))
+                    if st.button("⬇️ 선택한 종목 담기"):
+                        added_count = 0
+                        for s_name in selected_to_add:
+                            # 이미 담겨있는지 확인 (중복 방지)
+                            if not any(d['name'] == s_name for d in st.session_state.search_basket):
+                                row = search_results[search_results['Name'] == s_name].iloc[0]
+                                st.session_state.search_basket.append({
+                                    'code': str(row['Code']),
+                                    'name': row['Name'],
+                                    'rank': row['ActualRank'] if 'ActualRank' in row else 0,
+                                    'shares': row['Shares'] if 'Shares' in row else 0
+                                })
+                                added_count += 1
                         
-            except Exception as e:
-                st.error(f"종목 검색 중 오류 발생: {e}")
+                        if added_count > 0:
+                            st.success(f"{added_count}개 종목이 분석 대기 목록에 추가되었습니다.")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.info("이미 목록에 있는 종목입니다.")
+
+        except Exception as e:
+            st.error(f"검색 중 오류 발생: {e}")
+
+    # 현재 담긴 종목 보여주기
+    st.markdown("---")
+    st.subheader("📋 분석 대기 목록")
+    
+    if len(st.session_state.search_basket) > 0:
+        basket_df = pd.DataFrame(st.session_state.search_basket)
+        st.dataframe(basket_df[['code', 'name', 'rank']], hide_index=True, use_container_width=True)
+        
+        col_clear, col_dummy = st.columns([1, 4])
+        with col_clear:
+            if st.button("🗑️ 목록 초기화"):
+                st.session_state.search_basket = []
+                st.rerun()
+    else:
+        st.info("아직 담긴 종목이 없습니다. 위에서 검색 후 추가해주세요.")
 
 # --- 2. 실행 ---
 st.divider()
 if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width=True):
     
-    # 상위 종목 모드일 때만 리스트 생성 (검색 모드는 위에서 이미 생성됨)
+    # 상위 종목 모드일 때만 리스트 생성
     if mode == "🏆 시가총액 상위 종목 분석":
         with st.spinner("기초 데이터 준비 중..."):
             df_krx = get_stock_listing()
@@ -386,8 +414,20 @@ if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width
             if skipped_count > 0:
                 st.toast(f"ℹ️ 리츠/인프라 종목 {skipped_count}개 자동 제외됨")
     
+    # 검색 모드일 때는 장바구니 리스트 사용
+    else:
+        if not st.session_state.search_basket:
+            st.warning("분석할 종목을 먼저 검색해서 담아주세요.")
+            st.stop()
+        
+        # 튜플 형태로 변환
+        target_list = [
+            (item['code'], item['name'], item['rank'], item['shares']) 
+            for item in st.session_state.search_basket
+        ]
+
     if not target_list:
-        st.warning("분석할 종목이 선택되지 않았습니다.")
+        st.warning("분석할 종목이 없습니다.")
         st.stop()
 
     status_box = st.empty()
@@ -411,6 +451,7 @@ if st.button("🔄 결과 새로고침"): st.rerun()
 if 'analysis_result' in st.session_state and not st.session_state['analysis_result'].empty:
     df = st.session_state['analysis_result']
     
+    # 정렬 로직
     if "괴리율" in sort_opt:
         df = df.sort_values(by='괴리율(%)', ascending=False)
     else:

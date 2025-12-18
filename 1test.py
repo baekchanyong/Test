@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import concurrent.futures
 
 # --- [비밀번호 설정 구간 시작] ---
-my_password = "1478"
+my_password = "1414"
 
 st.set_page_config(page_title="KOSPI 분석기", page_icon="🎨", layout="wide")
 
@@ -256,7 +256,7 @@ def run_analysis_parallel(target_list, status_text, progress_bar, worker_count):
     return False
 
 # --- 메인 UI ---
-st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.0Ver</div>", unsafe_allow_html=True)
+st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.1Ver</div>", unsafe_allow_html=True)
 
 # 1. 설명서
 with st.expander("📘 **공지사항 & 산출공식**", expanded=True):
@@ -307,7 +307,7 @@ worker_count = 15 if "빠른" in speed_option else (8 if "보통" in speed_optio
 
 st.divider()
 
-# 분석 모드 선택
+# [수정] 분석 모드 선택 (검색 기능 강화 - 장바구니)
 mode = st.radio("분석 모드 선택", ["🏆 시가총액 상위 종목 분석", "🔍 특정 종목 검색/추천 분석"], horizontal=True)
 
 target_list = [] 
@@ -327,13 +327,13 @@ if mode == "🏆 시가총액 상위 종목 분석":
         if st.button("✅ 수치 적용", on_click=apply_manual_input): st.rerun()
 
 elif mode == "🔍 특정 종목 검색/추천 분석":
-    # [수정] Session State를 활용하여 검색 목록 유지 (장바구니 기능)
+    # [신규] 장바구니 세션 초기화
     if 'search_basket' not in st.session_state:
         st.session_state.search_basket = []
 
-    col_search, col_btn = st.columns([4, 1])
+    col_search, col_space = st.columns([4, 1])
     with col_search:
-        search_query = st.text_input("종목명 검색", placeholder="예: 삼성, 현대, 네이버")
+        search_query = st.text_input("종목명 검색", placeholder="예: 삼성, 현대, 카카오")
     
     # 검색 로직
     if search_query:
@@ -349,7 +349,7 @@ elif mode == "🔍 특정 종목 검색/추천 분석":
                     search_options = search_results['Name'].tolist()
                     selected_to_add = st.multiselect(f"'{search_query}' 검색 결과 (추가할 종목 선택)", search_options)
                     
-                    if st.button("⬇️ 선택한 종목 담기"):
+                    if st.button("⬇️ 리스트에 추가"):
                         added_count = 0
                         for s_name in selected_to_add:
                             # 이미 담겨있는지 확인 (중복 방지)
@@ -364,36 +364,36 @@ elif mode == "🔍 특정 종목 검색/추천 분석":
                                 added_count += 1
                         
                         if added_count > 0:
-                            st.success(f"{added_count}개 종목이 분석 대기 목록에 추가되었습니다.")
+                            st.success(f"{added_count}개 종목이 추가되었습니다.")
                             time.sleep(0.5)
                             st.rerun()
                         else:
-                            st.info("이미 목록에 있는 종목입니다.")
+                            st.info("선택한 종목이 이미 목록에 있습니다.")
 
         except Exception as e:
             st.error(f"검색 중 오류 발생: {e}")
 
-    # 현재 담긴 종목 보여주기
+    # 현재 대기 목록 보여주기
     st.markdown("---")
-    st.subheader("📋 분석 대기 목록")
+    c_head, c_btn = st.columns([4, 1])
+    with c_head:
+        st.subheader(f"📋 현재 대기 목록 ({len(st.session_state.search_basket)}개)")
+    with c_btn:
+        if st.button("🗑️ 목록 초기화"):
+            st.session_state.search_basket = []
+            st.rerun()
     
     if len(st.session_state.search_basket) > 0:
         basket_df = pd.DataFrame(st.session_state.search_basket)
         st.dataframe(basket_df[['code', 'name', 'rank']], hide_index=True, use_container_width=True)
-        
-        col_clear, col_dummy = st.columns([1, 4])
-        with col_clear:
-            if st.button("🗑️ 목록 초기화"):
-                st.session_state.search_basket = []
-                st.rerun()
     else:
-        st.info("아직 담긴 종목이 없습니다. 위에서 검색 후 추가해주세요.")
+        st.info("위에서 종목을 검색하여 추가해주세요.")
 
 # --- 2. 실행 ---
 st.divider()
 if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width=True):
     
-    # 상위 종목 모드일 때만 리스트 생성
+    # 1. 상위 종목 모드
     if mode == "🏆 시가총액 상위 종목 분석":
         with st.spinner("기초 데이터 준비 중..."):
             df_krx = get_stock_listing()
@@ -414,13 +414,13 @@ if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width
             if skipped_count > 0:
                 st.toast(f"ℹ️ 리츠/인프라 종목 {skipped_count}개 자동 제외됨")
     
-    # 검색 모드일 때는 장바구니 리스트 사용
+    # 2. 검색 모드 (장바구니 사용)
     else:
         if not st.session_state.search_basket:
             st.warning("분석할 종목을 먼저 검색해서 담아주세요.")
             st.stop()
         
-        # 튜플 형태로 변환
+        # 튜플 형태로 변환 (함수 인자용)
         target_list = [
             (item['code'], item['name'], item['rank'], item['shares']) 
             for item in st.session_state.search_basket
@@ -451,7 +451,6 @@ if st.button("🔄 결과 새로고침"): st.rerun()
 if 'analysis_result' in st.session_state and not st.session_state['analysis_result'].empty:
     df = st.session_state['analysis_result']
     
-    # 정렬 로직
     if "괴리율" in sort_opt:
         df = df.sort_values(by='괴리율(%)', ascending=False)
     else:

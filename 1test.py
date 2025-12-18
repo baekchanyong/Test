@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timedelta
 import concurrent.futures
 
-# --- [비밀번호 설정 구간] ---
+# --- [비밀번호 설정 구간 시작] ---
 my_password = "1478"
 
 st.set_page_config(page_title="KOSPI 분석기", page_icon="🎨", layout="wide")
@@ -20,6 +20,8 @@ if password_input != my_password:
     st.stop()
 
 st.write("🎉 Made By 찬용")
+# --- [비밀번호 설정 구간 끝] ---
+
 
 # --- [CSS] 스타일 적용 ---
 st.markdown("""
@@ -56,52 +58,53 @@ def get_stock_listing():
     if 'Marcap' in df.columns:
         df = df.sort_values(by='Marcap', ascending=False)
         df['ActualRank'] = range(1, len(df) + 1)
-        # 주식수 계산 (시가총액 / 현재가) - 데이터가 없을 경우를 대비
+        # 주식수 계산 (시가총액 / 현재가) - 데이터 누락 대비 안전장치
         df['Shares'] = df.apply(lambda x: x['Marcap'] / x['Close'] if x['Close'] > 0 else 0, axis=1)
     else:
         df['ActualRank'] = 0
         df['Shares'] = 0
     return df
 
-# --- [수정된 핵심 로직] 적정주가 산출 함수 ---
-def calculate_target_price(eps, bps, total_debt, total_equity, shares):
+# --- [신규] 적정주가 산출 로직 (부채 반영) ---
+def calculate_fair_value_v2(eps, bps, debt_total, equity_total, shares):
     """
-    요청사항 1: EPS*10 + BPS
-    단, 부채비율(총부채/총자본) > 100% 인 경우:
-    (EPS*10 + BPS) - (총부채 - 총자본) / 주식수
-    * total_debt, total_equity 단위: 억원 -> 원으로 변환 필요 (1억 = 100,000,000)
+    공식: EPS * 10 + BPS
+    단, 부채비율(부채/자본) > 100% 인 경우:
+      (EPS * 10 + BPS) - (총부채 - 총자본) / 주식수
+    * 데이터 단위 주의: 재무제표의 부채/자본은 보통 '억원' 단위임. 주식수는 '주' 단위.
     """
     if shares <= 0: return 0
     
     # 기본 적정가
     base_price = (eps * 10) + bps
     
-    # 부채비율 체크
-    if total_equity > 0:
-        debt_ratio = (total_debt / total_equity) * 100
+    # 부채비율 확인
+    if equity_total > 0:
+        debt_ratio = (debt_total / equity_total) * 100
         if debt_ratio > 100:
-            # 초과 부채에 대한 페널티 계산
-            # 데이터 크롤링 단위가 '억원'이므로 1억을 곱해줌
-            excess_debt_value = (total_debt - total_equity) * 100000000
-            penalty_per_share = excess_debt_value / shares
-            
-            final_price = base_price - penalty_per_share
+            # 초과 부채 (억원 단위 -> 원 단위 변환: * 1억)
+            excess_debt = (debt_total - equity_total) * 100000000
+            penalty = excess_debt / shares
+            final_price = base_price - penalty
             return final_price
-    
+            
     return base_price
 
 # --- 개별 종목 데이터 크롤링 ---
 def fetch_stock_data(item):
     code, name, rank, shares = item
     
-    # 결과 저장용 변수
-    prev_eps, prev_bps = 0.0, 0.0
-    est_eps, est_bps = 0.0, 0.0
-    
-    prev_debt, prev_equity = 0.0, 0.0 # 직전년도
-    latest_debt, latest_equity = 0.0, 0.0 # 최신 분기 (연간예상치 대체용)
-    
+    # 초기화
     current_price = 0.0
+    
+    # 과년도(직전년도) 데이터
+    prev_eps, prev_bps, prev_debt, prev_equity = 0.0, 0.0, 0.0, 0.0
+    
+    # 목표(예상치) 데이터
+    target_eps, target_bps, target_debt, target_equity = 0.0, 0.0, 0.0, 0.0
+    
+    # 최신 분기 데이터 (예상치 자본 누락 시 대체용)
+    quarter_debt, quarter_equity = 0.0, 0.0
     
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
@@ -117,131 +120,108 @@ def fetch_stock_data(item):
              if match: current_price = to_float(match.group(1))
         except: pass
 
-        # 재무제표 파싱
         dfs = pd.read_html(res.text, encoding='cp949')
         
+        # 재무제표 찾기
         for df in dfs:
-            # 주요재무제표 테이블 찾기 (매출액, 영업이익 등이 포함된 표)
             if '매출액' in df.iloc[:, 0].to_string() or '영업이익' in df.iloc[:, 0].to_string():
                 
-                # 컬럼 정리 (날짜)
-                # 보통 최근 연간 실적 3~4개 + 최근 분기 실적 6개 정도가 나옴
-                # 예: 2022.12 | 2023.12 | 2024.12(E) | ...
-                
-                # MultiIndex 처리
-                if isinstance(df.columns, pd.MultiIndex):
-                    cols = [str(c[1]) for c in df.columns] # 두번째 레벨이 날짜
-                else:
-                    cols = [str(c) for c in df.columns]
-                
-                # 데이터 행 찾기
-                # 첫번째 컬럼을 인덱스로 설정하여 찾기 쉽게 변환
+                # 인덱스 정리
                 df = df.set_index(df.columns[0])
                 
-                # 1. 직전년도 데이터 찾기 (예: 2024년이면 2023년 결산)
-                # (E)가 없고 가장 최근인 연도 컬럼 찾기
-                annual_cols = [c for c in cols if 'E' not in c and re.match(r'\d{4}\.\d{2}', c)]
-                # 분기 데이터 제외 (보통 연간 데이터가 앞에 나옴. 단순화를 위해 앞에서부터 검색)
-                # 네이버 금융은 [연간] [분기] 섹션이 나눠져 있진 않고 쭉 나열됨.
-                # 보통 앞쪽 3~4개가 연간.
+                # 컬럼명 리스트 (예: 2022.12 | 2023.12 | 2024.12(E) ...)
+                # MultiIndex인 경우 처리
+                if isinstance(df.columns, pd.MultiIndex):
+                     cols = [str(c[1]) for c in df.columns]
+                else:
+                     cols = [str(c) for c in df.columns]
                 
-                # 직전년도 컬럼 인덱스 찾기 (가장 오른쪽의 확정 연도)
-                prev_col = None
-                for c in cols:
-                    if re.match(r'\d{4}\.\d{2}', c) and '(E)' not in c:
-                        prev_col = c # 계속 갱신하면 마지막 확정 연도가 됨 (분기 제외 로직 필요하지만 일단 간단히)
-                        # 주의: 네이버 표는 연간 4개, 분기 6개 순서임.
-                        # 연도(YYYY.MM) 포맷인 것 중 앞쪽 4개 안에서 찾아야 함.
-                
-                # 안전하게: 컬럼명 리스트에서 '(E)'가 있는 첫번째 컬럼의 바로 앞 컬럼을 직전년도로 간주
-                # 또는 (E)가 없으면 전체 중 가장 최근 연간
-                
-                est_col_idx = -1
+                # 1. 컬럼 인덱스 찾기
+                # (E)가 있는 연간 컬럼 찾기
+                est_idx = -1
                 for i, c in enumerate(cols):
-                    if '(E)' in c:
-                        est_col_idx = i
+                    if '(E)' in c and re.search(r'\d{4}\.\d{2}', c):
+                        est_idx = i
                         break
                 
-                if est_col_idx != -1:
-                    target_est_col = cols[est_col_idx]
-                    target_prev_col = cols[est_col_idx - 1] # 예상치 바로 앞이 직전 확정치
+                # 직전년도(확정) 인덱스 찾기
+                # 예상치가 있으면 그 바로 앞, 없으면 연간 섹션(보통 앞 4개) 중 마지막
+                prev_idx = -1
+                if est_idx != -1:
+                    prev_idx = est_idx - 1
                 else:
-                    # 예상치가 없으면 그냥 가장 최근 확정치 사용
-                    # 연간 섹션(보통 인덱스 1~4) 중 마지막
-                    # 인덱스 0은 항목명.
-                    target_est_col = None # 예상치 없음
-                    # 날짜 형식인 컬럼 중 분기가 아닌 것 찾기 애매하므로, 
-                    # 통상적으로 3번째 데이터 컬럼(최근)을 사용
-                    if len(cols) > 3:
-                        target_prev_col = cols[3] 
-                    else:
-                        target_prev_col = cols[-1]
+                    # 연간 데이터 중 가장 최근 것 찾기 (보통 3번째가 최근 연간 실적)
+                    # 안전하게 날짜 형식인 것 중 뒤에서부터 탐색
+                    for i in range(len(cols)-1, -1, -1):
+                        if re.match(r'\d{4}\.\d{2}', cols[i]) and '(E)' not in cols[i]:
+                            # 분기 데이터(최근 6개)와 섞여있을 수 있음. 
+                            # 네이버는 [연간 4개] [분기 6개] 순서임.
+                            # 인덱스가 3 이하인 것 중에서 찾음
+                            if i < 4: 
+                                prev_idx = i
+                                break
+                    if prev_idx == -1: prev_idx = 3 # fallback (보통 2023.12 위치)
 
-                # --- 데이터 추출 함수 ---
-                def get_val(idx_name):
-                    # 인덱스 이름에 포함된 행 찾기
-                    found = df.index[df.index.str.contains(idx_name, na=False)]
-                    if len(found) > 0:
-                        return found[0]
-                    return None
+                # 최신 분기 인덱스 (맨 오른쪽)
+                quarter_idx = len(cols) - 1
 
-                # 1) 과년도(직전년도) 데이터 추출
-                if target_prev_col:
+                # --- 데이터 추출 헬퍼 ---
+                def get_data(row_name, col_idx):
+                    if col_idx < 0 or col_idx >= len(cols): return 0.0
                     try:
-                        prev_eps = to_float(df.loc[get_val('EPS'), target_prev_col])
-                        prev_bps = to_float(df.loc[get_val('BPS'), target_prev_col])
-                        prev_debt = to_float(df.loc[get_val('부채총계'), target_prev_col])
-                        prev_equity = to_float(df.loc[get_val('자본총계'), target_prev_col])
+                        # row_name이 포함된 행 찾기
+                        target_rows = df.index[df.index.str.contains(row_name, na=False)]
+                        if len(target_rows) > 0:
+                            return to_float(df.iloc[df.index.get_loc(target_rows[0]), col_idx])
                     except: pass
+                    return 0.0
 
-                # 2) 연간 예상치(Estimate) 데이터 추출
-                if target_est_col:
-                    try:
-                        est_eps = to_float(df.loc[get_val('EPS'), target_est_col])
-                        est_bps = to_float(df.loc[get_val('BPS'), target_est_col])
-                        est_debt = to_float(df.loc[get_val('부채총계'), target_est_col])
-                        est_equity = to_float(df.loc[get_val('자본총계'), target_est_col])
-                    except: pass
-                else:
-                    # 예상치 없으면 직전년도 데이터를 예상치로 사용 (보수적 접근)
-                    est_eps, est_bps = prev_eps, prev_bps
+                # 1) 과년도 데이터 추출
+                prev_eps = get_data('EPS', prev_idx)
+                prev_bps = get_data('BPS', prev_idx)
+                prev_debt = get_data('부채총계', prev_idx)
+                prev_equity = get_data('자본총계', prev_idx)
                 
-                # 3) 최신 분기 데이터 (부채/자본 누락 대비용)
-                # 보통 테이블의 가장 오른쪽 끝이 최신 분기일 확률 높음 (네이버 구조상)
-                last_col = cols[-1]
-                try:
-                    latest_debt = to_float(df.loc[get_val('부채총계'), last_col])
-                    latest_equity = to_float(df.loc[get_val('자본총계'), last_col])
-                except: pass
+                # 2) 목표(예상) 데이터 추출
+                # 예상치가 없으면 과년도 데이터 사용
+                target_idx = est_idx if est_idx != -1 else prev_idx
+                target_eps = get_data('EPS', target_idx)
+                target_bps = get_data('BPS', target_idx)
+                target_debt = get_data('부채총계', target_idx)
+                target_equity = get_data('자본총계', target_idx)
                 
-                break # 표를 찾았으니 루프 종료
+                # 3) 최신 분기 데이터 (부채/자본 백업용)
+                quarter_debt = get_data('부채총계', quarter_idx)
+                quarter_equity = get_data('자본총계', quarter_idx)
+                
+                break
 
         # --- 적정주가 계산 ---
-        # 1. 과년도 적정주가 (직전년도 실적 + 직전년도 부채비율)
-        fair_price_prev = calculate_target_price(prev_eps, prev_bps, prev_debt, prev_equity, shares)
+        # 1. 과년도 적정주가
+        fair_prev = calculate_fair_value_v2(prev_eps, prev_bps, prev_debt, prev_equity, shares)
         
-        # 2. 목표 적정주가 (예상치 실적 + 부채비율)
-        # 단, 예상치에 부채/자본 데이터가 0이면 최신 분기 데이터 사용 (요청사항 3)
-        calc_debt = est_debt if est_debt > 0 else latest_debt
-        calc_equity = est_equity if est_equity > 0 else latest_equity
+        # 2. 목표 적정주가
+        # 예상치에 부채/자본이 없으면 최신 분기 데이터 사용
+        use_debt = target_debt if target_debt > 0 else quarter_debt
+        use_equity = target_equity if target_equity > 0 else quarter_equity
         
-        fair_price_target = calculate_target_price(est_eps, est_bps, calc_debt, calc_equity, shares)
-
-        # 3. Gap (괴리율) : 목표 적정주가 대비 현재가
+        fair_target = calculate_fair_value_v2(target_eps, target_bps, use_debt, use_equity, shares)
+        
+        # 괴리율 (목표 적정가 기준)
         gap = 0
         if current_price > 0:
-            gap = (fair_price_target - current_price) / current_price * 100
-        
-        # 4. Diff (현재가 - 과년도 적정주가) : 요청사항 5 정렬용
-        diff_prev = current_price - fair_price_prev
+            gap = (fair_target - current_price) / current_price * 100
+            
+        # 정렬용 (현재가 - 과년도 적정가)
+        diff_val = current_price - fair_prev
 
         return {
             'code': code, 'name': name, 'rank': rank,
             'price': current_price,
-            'fair_prev': fair_price_prev,   # 과년도 적정주가
-            'fair_target': fair_price_target, # 목표(예상) 적정주가
+            'fair_prev': fair_prev,
+            'fair_target': fair_target,
             'gap': gap,
-            'diff_prev': diff_prev
+            'diff_val': diff_val
         }
 
     except Exception as e:
@@ -261,7 +241,7 @@ def run_analysis_parallel(target_list, status_text, progress_bar, worker_count):
             completed_count += 1
             progress_bar.progress(min(completed_count / total, 1.0))
             
-            if data and data['price'] > 0: # 현재가가 0인 거래정지 종목 등 제외
+            if data and data['price'] > 0:
                 status_text.text(f"⚡ [{completed_count}/{total}] {data['name']} 분석 완료")
                 
                 results.append({
@@ -270,9 +250,9 @@ def run_analysis_parallel(target_list, status_text, progress_bar, worker_count):
                     '시총순위': data['rank'],
                     '과년도 적정주가': round(data['fair_prev'], 0),
                     '현재가': round(data['price'], 0),
-                    '적정주가': round(data['fair_target'], 0), # 이것이 목표 적정가
+                    '적정주가': round(data['fair_target'], 0),
                     '괴리율(%)': round(data['gap'], 2),
-                    'Gap_Prev': data['diff_prev'] # 정렬용 히든 컬럼
+                    'Diff_Sort': data['diff_val'] # 정렬용 (화면 표시 X)
                 })
 
     progress_bar.empty()
@@ -282,24 +262,43 @@ def run_analysis_parallel(target_list, status_text, progress_bar, worker_count):
     return False
 
 # --- 메인 UI ---
-st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 2.0Ver</div>", unsafe_allow_html=True)
+st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.0Ver</div>", unsafe_allow_html=True)
 
-# 1. 설명서
-with st.expander("📘 **공지사항 & 산출공식**", expanded=True):
+# 1. 설명서 (요청하신 대로 복구 및 수정 X)
+with st.expander("📘 **공지사항**", expanded=True):
     st.markdown("""
     <div class='info-text'>
-    <span class='pastel-blue'>산출공식 (부채비율 반영)</span><br>
-    <b>1. 기본 공식 (부채비율 100% 이하)</b><br>
-    &nbsp; • 적정주가 = <b>(EPS × 10) + BPS</b><br><br>
-    
-    <b>2. 부채 과다 페널티 (부채비율 100% 초과)</b><br>
-    &nbsp; • 적정주가 = (EPS × 10) + BPS - <b>[(총부채 - 총자본) ÷ 주식수]</b><br>
-    &nbsp; <span class='pastel-red'>* 초과된 부채만큼 주당 가치를 차감하여 보수적으로 산정합니다.</span><br><br>
 
-    <span class='pastel-blue'>데이터 기준</span><br>
-    &nbsp; • <b>과년도 적정주가:</b> 직전년도 확정 실적 기준<br>
-    &nbsp; • <b>적정주가 (Target):</b> 네이버 연간 예상치(컨센서스) 기준<br>
-    &nbsp; (※ 예상치 부채정보 부재 시 최신 분기 데이터 사용)
+    <span class='pastel-blue'>공지사항</span><br>
+    <span class='pastel-red'># 적정주가는 절대적인 값보다, 상대적으로 봐야됨</span><br>
+    <span class='pastel-red'># 괴리율 높고,공포지수 낮을수록 매수대상으로 판단</span><br>
+    <br><br>
+
+    <span class='pastel-blue'>산출공식</span><br>
+    <b>1. 적정주가(수익중심 모델)</b><br>
+    &nbsp; • <b> (수익가치×0.7 + 자산가치×0.3) × 심리보정계수</b><br>
+    &nbsp; - <b> 수익가치(70%):</b> (EPS ÷ 한국은행 기준금리)<br>
+    &nbsp; - <b> 자산가치(30%):</b> BPS<br><br>
+    
+    <b>2. 공포탐욕지수 (주봉 기준)</b><br>
+    &nbsp; • <b> RSI(14주) </b> 50% + <b> 이격도(20주) </b> 50%<br>
+    &nbsp; - <b> 30점 이하 </b> (공포/매수), <b>70점 이상 </b> (탐욕/매도)<br><br>
+
+    <b>3. 심리보정 수식</b><br>
+    &nbsp; • <b>공식:</b> 1 + ((50 - 공포지수) ÷ 50 × 0.1)<br>
+    &nbsp; - 공포 구간일수록 적정주가를 높게, 탐욕 구간일수록 낮게 보정
+    </div>
+    """, unsafe_allow_html=True)
+
+# 2. 패치노트 (요청하신 대로 복구)
+with st.expander("🛠️ **패치노트**", expanded=False):
+    st.markdown("""
+    <div class='info-text'>
+    
+    <b>(25.11.26) 1.0Ver : 최초배포</b><br>
+    &nbsp; • 분석 제외종목 : 맥쿼리인프라, SK리츠, 제이알글로벌리츠, 롯데리츠, ESR켄달스퀘어리츠, 신한알파리츠, 맵스리얼티1, 이리츠코크렙, 코람코에너지리츠<br>
+    &nbsp;   - 일반제조업과 회계방식차이로 인하여 과도하게 저평가되는 종목들 제외<br>
+    &nbsp; • 시총순위 : ETF(KODEX200 등) 제외한 시가총액 순위<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -324,7 +323,7 @@ if mode == "🏆 시가총액 상위":
     if 'stock_count' not in st.session_state: st.session_state.stock_count = 200 
 
     def update_from_slider(): st.session_state.stock_count = st.session_state.slider_key
-    def apply_manual_input(): st.session_state.stock_count = st.session_state.num_input
+    def apply_manual_input(): st.session_state.stock_count = st.session_state.num_key
 
     c1, c2 = st.columns([3, 1])
     with c1:
@@ -399,21 +398,21 @@ if st.button("🔄 결과 새로고침"): st.rerun()
 if 'analysis_result' in st.session_state and not st.session_state['analysis_result'].empty:
     df = st.session_state['analysis_result']
     
-    # 정렬 로직 수정
+    # 정렬 로직
     if "괴리율" in sort_opt:
         df = df.sort_values(by='괴리율(%)', ascending=False)
     else:
-        # 현재가 - 과년도 적정가 (작을수록 과년도 가치 대비 현재가가 싼 것)
-        df = df.sort_values(by='Gap_Prev', ascending=True)
+        # [수정] Diff_Sort 기준으로 오름차순 정렬 (값이 작을수록 현재가가 과년도보다 싼 것)
+        df = df.sort_values(by='Diff_Sort', ascending=True)
     
     df = df.reset_index(drop=True)
     df.index += 1
     df.index.name = "순위"
     
-    # 표시할 컬럼 지정 (요청사항 4)
+    # [수정] 표 컬럼 구성
     # 순위(Index) | 종목명 | 과년도 적정주가 | 현재가 | 적정주가(목표) | 괴리율
-    # Gap_Prev는 정렬용이므로 표시 안 함
     cols = ['시총순위', '과년도 적정주가', '현재가', '적정주가', '괴리율(%)']
+    
     df_display = df.set_index('종목명', append=True)
     
     top = df.iloc[0]

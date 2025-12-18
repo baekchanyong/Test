@@ -37,6 +37,12 @@ st.markdown("""
     .info-text { font-size: 1rem; line-height: 1.6; }
     .pastel-blue { color: #5C7CFA; font-weight: bold; }
     .pastel-red { color: #D47C94; font-weight: bold; }
+    
+    /* 버튼 스타일 조정 (옵션) */
+    .stButton button {
+        width: 100%;
+    }
+    
     @media (max-width: 600px) { .info-text { font-size: 0.9rem; } }
 </style>
 """, unsafe_allow_html=True)
@@ -307,7 +313,7 @@ worker_count = 15 if "빠른" in speed_option else (8 if "보통" in speed_optio
 
 st.divider()
 
-# [수정] 분석 모드 선택 (검색 기능 UI 개선)
+# 분석 모드 선택
 mode = st.radio("분석 모드 선택", ["🏆 시가총액 상위 종목 분석", "🔍 특정 종목 검색/추천 분석"], horizontal=True)
 
 target_list = [] 
@@ -327,16 +333,16 @@ if mode == "🏆 시가총액 상위 종목 분석":
         if st.button("✅ 수치 적용", on_click=apply_manual_input): st.rerun()
 
 elif mode == "🔍 특정 종목 검색/추천 분석":
-    # 장바구니 세션 초기화
+    # 장바구니 세션
     if 'search_basket' not in st.session_state:
         st.session_state.search_basket = []
 
     search_query = st.text_input("종목명 검색", placeholder="예: 삼성, 현대, 카카오")
     
-    # 검색 로직
+    # [수정] 검색 결과 표시 영역 (그리드 형태 + 원클릭 추가)
     if search_query:
         try:
-            # Spinner 없이 빠르게 반응하도록 수정
+            # Spinner 없이 빠르게 반응
             df_krx = get_stock_listing()
             search_results = df_krx[df_krx['Name'].str.contains(search_query, case=False)]
             
@@ -344,28 +350,45 @@ elif mode == "🔍 특정 종목 검색/추천 분석":
                 st.error(f"❌ '{search_query}' 검색 결과가 없습니다.")
             else:
                 st.write(f"🔎 검색 결과: {len(search_results)}건")
-                # 결과가 너무 많으면 상위 20개만
-                display_results = search_results.head(20)
                 
-                # [개선] 리스트 형태로 보여주고 원클릭 추가
-                for idx, row in display_results.iterrows():
-                    c_name, c_btn = st.columns([4, 1])
-                    with c_name:
-                        st.markdown(f"**{row['Name']}** ({row['Code']})")
-                    with c_btn:
-                        # 이미 담겼는지 확인
-                        is_added = any(d['code'] == str(row['Code']) for d in st.session_state.search_basket)
-                        if is_added:
-                            st.button("✅ 담김", key=f"btn_added_{row['Code']}", disabled=True)
-                        else:
-                            if st.button("➕ 추가", key=f"btn_add_{row['Code']}"):
-                                st.session_state.search_basket.append({
-                                    'code': str(row['Code']),
-                                    'name': row['Name'],
-                                    'rank': row['ActualRank'] if 'ActualRank' in row else 0,
-                                    'shares': row['Shares'] if 'Shares' in row else 0
-                                })
-                                st.rerun()
+                # 상위 30개까지만 표시 (성능 이슈 방지)
+                display_limit = 30
+                results_to_show = search_results.head(display_limit)
+                
+                # 3열 그리드 생성 (한 줄에 3개씩)
+                cols_count = 3
+                rows = [results_to_show.iloc[i:i+cols_count] for i in range(0, len(results_to_show), cols_count)]
+                
+                for row_data in rows:
+                    cols = st.columns(cols_count)
+                    for idx, (i, stock) in enumerate(row_data.iterrows()):
+                        with cols[idx]:
+                            # 카드 형태의 컨테이너 (시각적 구분)
+                            with st.container():
+                                # 버튼(왼쪽) + 텍스트(오른쪽) 레이아웃
+                                c_btn, c_txt = st.columns([0.3, 0.7])
+                                
+                                with c_btn:
+                                    # 이미 담겼는지 확인
+                                    is_added = any(d['code'] == str(stock['Code']) for d in st.session_state.search_basket)
+                                    if is_added:
+                                        st.button("✅", key=f"added_{stock['Code']}", disabled=True, use_container_width=True)
+                                    else:
+                                        if st.button("➕", key=f"add_{stock['Code']}", use_container_width=True):
+                                            st.session_state.search_basket.append({
+                                                'code': str(stock['Code']),
+                                                'name': stock['Name'],
+                                                'rank': stock['ActualRank'] if 'ActualRank' in stock else 0,
+                                                'shares': stock['Shares'] if 'Shares' in stock else 0
+                                            })
+                                            st.rerun() # 클릭 즉시 갱신
+                                
+                                with c_txt:
+                                    st.markdown(f"**{stock['Name']}**")
+                                    st.caption(f"{stock['Code']}")
+                                    
+                if len(search_results) > display_limit:
+                    st.caption(f"...외 {len(search_results)-display_limit}건 생략 (검색어를 더 구체적으로 입력하세요)")
 
         except Exception as e:
             st.error(f"검색 중 오류 발생: {e}")
@@ -384,13 +407,12 @@ elif mode == "🔍 특정 종목 검색/추천 분석":
         basket_df = pd.DataFrame(st.session_state.search_basket)
         st.dataframe(basket_df[['code', 'name', 'rank']], hide_index=True, use_container_width=True)
     else:
-        st.info("위에서 종목을 검색하여 [+] 버튼으로 추가해주세요.")
+        st.info("위에서 종목을 검색하여 [➕] 버튼을 눌러 담아주세요.")
 
 # --- 2. 실행 ---
 st.divider()
 if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width=True):
     
-    # 1. 상위 종목 모드
     if mode == "🏆 시가총액 상위 종목 분석":
         with st.spinner("기초 데이터 준비 중..."):
             df_krx = get_stock_listing()
@@ -411,7 +433,6 @@ if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width
             if skipped_count > 0:
                 st.toast(f"ℹ️ 리츠/인프라 종목 {skipped_count}개 자동 제외됨")
     
-    # 2. 검색 모드
     else:
         if not st.session_state.search_basket:
             st.warning("분석할 종목을 먼저 검색해서 담아주세요.")
@@ -447,7 +468,6 @@ if st.button("🔄 결과 새로고침"): st.rerun()
 if 'analysis_result' in st.session_state and not st.session_state['analysis_result'].empty:
     df = st.session_state['analysis_result']
     
-    # 정렬 로직
     if "괴리율" in sort_opt:
         df = df.sort_values(by='괴리율(%)', ascending=False)
     else:

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import concurrent.futures
 
 # --- [비밀번호 설정 구간 시작] ---
-my_password = "1478"
+my_password = "1414"
 
 st.set_page_config(page_title="KOSPI 분석기", page_icon="🎨", layout="wide")
 
@@ -49,15 +49,14 @@ def to_float(val):
         return float(clean_val)
     except: return 0.0
 
-# --- 종목 리스트 로딩 (오류 수정됨) ---
+# --- 종목 리스트 로딩 ---
 @st.cache_data
 def get_stock_listing():
     df = fdr.StockListing('KOSPI')
     if 'Symbol' in df.columns:
         df = df.rename(columns={'Symbol': 'Code'})
     
-    # [수정] 데이터 타입 강제 변환 (문자열 -> 숫자)
-    # 데이터가 '1,000' 처럼 콤마가 있거나 문자로 인식되는 경우를 방지
+    # 데이터 타입 강제 변환
     if 'Close' in df.columns:
         df['Close'] = pd.to_numeric(df['Close'], errors='coerce').fillna(0)
     if 'Marcap' in df.columns:
@@ -66,9 +65,7 @@ def get_stock_listing():
     if 'Marcap' in df.columns:
         df = df.sort_values(by='Marcap', ascending=False)
         df['ActualRank'] = range(1, len(df) + 1)
-        
-        # [수정] 벡터화 연산 사용 (apply보다 빠르고 안전함)
-        # 주식수 = 시가총액 / 현재가 (현재가가 0보다 클 때만)
+        # 주식수 계산
         df['Shares'] = np.where(df['Close'] > 0, df['Marcap'] / df['Close'], 0)
     else:
         df['ActualRank'] = 0
@@ -156,15 +153,13 @@ def fetch_stock_data(item):
                 if est_idx != -1:
                     prev_idx = est_idx - 1
                 else:
-                    # 예상치 없으면 연간 데이터 중 가장 최근 것 찾기
                     for i in range(len(cols)-1, -1, -1):
                         if re.match(r'\d{4}\.\d{2}', cols[i]) and '(E)' not in cols[i]:
-                            if i < 4: # 네이버 표 구조상 앞쪽이 연간
+                            if i < 4: 
                                 prev_idx = i
                                 break
-                    if prev_idx == -1: prev_idx = 3 # fallback
+                    if prev_idx == -1: prev_idx = 3 
 
-                # 최신 분기 인덱스 (맨 오른쪽)
                 quarter_idx = len(cols) - 1
 
                 # 데이터 추출 헬퍼
@@ -200,7 +195,7 @@ def fetch_stock_data(item):
         # 1. 과년도 적정주가
         fair_prev = calculate_fair_value_v2(prev_eps, prev_bps, prev_debt, prev_equity, shares)
         
-        # 2. 목표 적정주가 (부채정보 없으면 최신 분기 사용)
+        # 2. 목표 적정주가
         use_debt = target_debt if target_debt > 0 else quarter_debt
         use_equity = target_equity if target_equity > 0 else quarter_equity
         
@@ -211,7 +206,7 @@ def fetch_stock_data(item):
         if current_price > 0:
             gap = (fair_target - current_price) / current_price * 100
             
-        # 정렬용 (현재가 - 과년도 적정가)
+        # 정렬용
         diff_val = current_price - fair_prev
 
         return {
@@ -251,7 +246,7 @@ def run_analysis_parallel(target_list, status_text, progress_bar, worker_count):
                     '현재가': round(data['price'], 0),
                     '적정주가': round(data['fair_target'], 0),
                     '괴리율(%)': round(data['gap'], 2),
-                    'Gap_Prev': data['diff_val'] # 정렬용 히든 컬럼
+                    'Gap_Prev': data['diff_val']
                 })
 
     progress_bar.empty()
@@ -261,35 +256,28 @@ def run_analysis_parallel(target_list, status_text, progress_bar, worker_count):
     return False
 
 # --- 메인 UI ---
-st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.0Ver</div>", unsafe_allow_html=True)
+st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.1Ver</div>", unsafe_allow_html=True)
 
-# 1. 공지사항 (요청하신 대로 유지)
-with st.expander("📘 **공지사항**", expanded=True):
+# 1. 설명서 (수정됨)
+with st.expander("📘 **공지사항 & 산출공식**", expanded=True):
     st.markdown("""
     <div class='info-text'>
-
-    <span class='pastel-blue'>공지사항</span><br>
-    <span class='pastel-red'># 적정주가는 절대적인 값보다, 상대적으로 봐야됨</span><br>
-    <span class='pastel-red'># 괴리율 높고,공포지수 낮을수록 매수대상으로 판단</span><br>
-    <br><br>
-
-    <span class='pastel-blue'>산출공식</span><br>
-    <b>1. 적정주가(수익중심 모델)</b><br>
-    &nbsp; • <b> (수익가치×0.7 + 자산가치×0.3) × 심리보정계수</b><br>
-    &nbsp; - <b> 수익가치(70%):</b> (EPS ÷ 한국은행 기준금리)<br>
-    &nbsp; - <b> 자산가치(30%):</b> BPS<br><br>
+    <span class='pastel-blue'>산출공식 (부채비율 반영)</span><br>
+    <b>1. 기본 공식 (부채비율 100% 이하)</b><br>
+    &nbsp; • 적정주가 = <b>(EPS × 10) + BPS</b><br><br>
     
-    <b>2. 공포탐욕지수 (주봉 기준)</b><br>
-    &nbsp; • <b> RSI(14주) </b> 50% + <b> 이격도(20주) </b> 50%<br>
-    &nbsp; - <b> 30점 이하 </b> (공포/매수), <b>70점 이상 </b> (탐욕/매도)<br><br>
+    <b>2. 부채 과다 페널티 (부채비율 100% 초과)</b><br>
+    &nbsp; • 적정주가 = (EPS × 10) + BPS - <b>[(총부채 - 총자본) ÷ 주식수]</b><br>
+    &nbsp; <span class='pastel-red'>* 초과된 부채만큼 주당 가치를 차감하여 보수적으로 산정합니다.</span><br><br>
 
-    <b>3. 심리보정 수식</b><br>
-    &nbsp; • <b>공식:</b> 1 + ((50 - 공포지수) ÷ 50 × 0.1)<br>
-    &nbsp; - 공포 구간일수록 적정주가를 높게, 탐욕 구간일수록 낮게 보정
+    <span class='pastel-blue'>데이터 기준</span><br>
+    &nbsp; • <b>과년도 적정주가:</b> 직전년도 확정 실적 기준<br>
+    &nbsp; • <b>적정주가 (Target):</b> 네이버 연간 예상치(컨센서스) 기준<br>
+    &nbsp; (※ 예상치 부채정보 부재 시 최신 분기 데이터 사용)
     </div>
     """, unsafe_allow_html=True)
 
-# 2. 패치노트 (요청하신 대로 유지)
+# 2. 패치노트 (원복됨)
 with st.expander("🛠️ **패치노트**", expanded=False):
     st.markdown("""
     <div class='info-text'>
@@ -298,6 +286,11 @@ with st.expander("🛠️ **패치노트**", expanded=False):
     &nbsp; • 분석 제외종목 : 맥쿼리인프라, SK리츠, 제이알글로벌리츠, 롯데리츠, ESR켄달스퀘어리츠, 신한알파리츠, 맵스리얼티1, 이리츠코크렙, 코람코에너지리츠<br>
     &nbsp;   - 일반제조업과 회계방식차이로 인하여 과도하게 저평가되는 종목들 제외<br>
     &nbsp; • 시총순위 : ETF(KODEX200 등) 제외한 시가총액 순위<br>
+      
+    <b>(25.11.26) 1.1Ver : 적정주가 산출방식 변경</b><br>
+    &nbsp; • 적정주가 수식 변경<br>
+    &nbsp;   - 공포지수, eps,bps반영율 변경<br>
+    &nbsp; • 종목 검색기능 추가<br>
     </div>
     """, unsafe_allow_html=True)
 
@@ -315,14 +308,17 @@ worker_count = 15 if "빠른" in speed_option else (8 if "보통" in speed_optio
 
 st.divider()
 
-mode = st.radio("분석 모드", ["🏆 시가총액 상위", "🔍 종목 검색"], horizontal=True)
+# [수정] 분석 모드 선택 (검색 기능 추가)
+mode = st.radio("분석 모드 선택", ["🏆 시가총액 상위 종목 분석", "🔍 특정 종목 검색/추천 분석"], horizontal=True)
+
 target_list = [] 
 
-if mode == "🏆 시가총액 상위":
+if mode == "🏆 시가총액 상위 종목 분석":
+    st.write("📊 **분석할 상위 종목 수 설정**")
     if 'stock_count' not in st.session_state: st.session_state.stock_count = 200 
 
     def update_from_slider(): st.session_state.stock_count = st.session_state.slider_key
-    def apply_manual_input(): st.session_state.stock_count = st.session_state.num_key
+    def apply_manual_input(): st.session_state.stock_count = st.session_state.num_input
 
     c1, c2 = st.columns([3, 1])
     with c1:
@@ -331,28 +327,46 @@ if mode == "🏆 시가총액 상위":
         st.number_input("직접 입력", 10, 400, key='num_key', value=st.session_state.stock_count)
         if st.button("✅ 수치 적용", on_click=apply_manual_input): st.rerun()
 
-elif mode == "🔍 종목 검색":
-    query = st.text_input("종목명 검색", placeholder="예: 삼성")
-    if query:
-        try:
-            with st.spinner("목록 검색 중..."):
+elif mode == "🔍 특정 종목 검색/추천 분석":
+    search_query = st.text_input("분석하고 싶은 종목명을 입력하세요 (예: 삼성, 현대, 카카오)", placeholder="종목명 입력 후 Enter")
+    
+    if search_query:
+        # 전체 리스트 가져오기
+        with st.spinner("종목 리스트 검색 중..."):
+            try:
                 df_krx = get_stock_listing()
-                res = df_krx[df_krx['Name'].str.contains(query, case=False)]
-                if res.empty: st.error("결과 없음")
+                # 검색 로직 (포함 검색)
+                search_results = df_krx[df_krx['Name'].str.contains(search_query, case=False)]
+                
+                if search_results.empty:
+                    st.error(f"❌ '{search_query}'에 대한 검색 결과가 없습니다.")
+                    st.info("💡 팁: 정확한 종목명이 기억나지 않는다면, 이름의 일부만 입력해보세요 (예: '삼성' -> '삼성전자', '삼성생명')")
                 else:
-                    picks = st.multiselect("선택", res['Name'].tolist(), default=res['Name'].tolist()[:5])
-                    selected = res[res['Name'].isin(picks)]
-                    for idx, row in selected.iterrows():
+                    st.success(f"🔎 총 {len(search_results)}개의 종목을 찾았습니다.")
+                    # 멀티 셀렉트로 선택하게 함
+                    selected_stocks_names = st.multiselect(
+                        "분석할 종목을 선택해주세요 (복수 선택 가능)",
+                        search_results['Name'].tolist(),
+                        default=search_results['Name'].tolist()[:5] # 상위 5개 기본 선택
+                    )
+                    
+                    # 선택된 종목들로 타겟 리스트 구성
+                    selected_rows = search_results[search_results['Name'].isin(selected_stocks_names)]
+                    
+                    for idx, row in selected_rows.iterrows():
                         rank_val = row['ActualRank'] if 'ActualRank' in row else 0
                         shares = row['Shares'] if 'Shares' in row else 0
                         target_list.append((str(row['Code']), row['Name'], rank_val, shares))
-        except: st.error("오류 발생")
+                        
+            except Exception as e:
+                st.error(f"종목 검색 중 오류 발생: {e}")
 
 # --- 2. 실행 ---
 st.divider()
 if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width=True):
     
-    if mode == "🏆 시가총액 상위":
+    # 상위 종목 모드일 때만 리스트 생성 (검색 모드는 위에서 이미 생성됨)
+    if mode == "🏆 시가총액 상위 종목 분석":
         with st.spinner("기초 데이터 준비 중..."):
             df_krx = get_stock_listing()
             top_n = df_krx.head(st.session_state.stock_count)
@@ -373,7 +387,7 @@ if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width
                 st.toast(f"ℹ️ 리츠/인프라 종목 {skipped_count}개 자동 제외됨")
     
     if not target_list:
-        st.warning("분석할 종목이 없습니다.")
+        st.warning("분석할 종목이 선택되지 않았습니다.")
         st.stop()
 
     status_box = st.empty()
@@ -397,7 +411,6 @@ if st.button("🔄 결과 새로고침"): st.rerun()
 if 'analysis_result' in st.session_state and not st.session_state['analysis_result'].empty:
     df = st.session_state['analysis_result']
     
-    # 정렬
     if "괴리율" in sort_opt:
         df = df.sort_values(by='괴리율(%)', ascending=False)
     else:
@@ -407,7 +420,6 @@ if 'analysis_result' in st.session_state and not st.session_state['analysis_resu
     df.index += 1
     df.index.name = "순위"
     
-    # 표 컬럼 지정
     cols = ['시총순위', '과년도 적정주가', '현재가', '적정주가', '괴리율(%)']
     df_display = df.set_index('종목명', append=True)
     

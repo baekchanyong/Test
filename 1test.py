@@ -38,9 +38,10 @@ st.markdown("""
     .pastel-blue { color: #5C7CFA; font-weight: bold; }
     .pastel-red { color: #D47C94; font-weight: bold; }
     
-    /* 버튼 스타일 조정 (옵션) */
-    .stButton button {
-        width: 100%;
+    /* 리스트 스타일 조정 */
+    .stock-row {
+        padding: 10px;
+        border-bottom: 1px solid #f0f2f6;
     }
     
     @media (max-width: 600px) { .info-text { font-size: 0.9rem; } }
@@ -339,80 +340,77 @@ elif mode == "🔍 특정 종목 검색/추천 분석":
 
     search_query = st.text_input("종목명 검색", placeholder="예: 삼성, 현대, 카카오")
     
-    # [수정] 검색 결과 표시 영역 (그리드 형태 + 원클릭 추가)
+    # [수정된 검색 UI] 리스트 형태 + 우측 버튼
     if search_query:
         try:
-            # Spinner 없이 빠르게 반응
+            # Spinner 없이 빠르게
             df_krx = get_stock_listing()
             search_results = df_krx[df_krx['Name'].str.contains(search_query, case=False)]
             
             if search_results.empty:
                 st.error(f"❌ '{search_query}' 검색 결과가 없습니다.")
             else:
-                st.write(f"🔎 검색 결과: {len(search_results)}건")
+                st.markdown(f"🔎 **검색 결과 ({len(search_results)}건)**")
                 
-                # 상위 30개까지만 표시 (성능 이슈 방지)
-                display_limit = 30
-                results_to_show = search_results.head(display_limit)
+                # 상위 10개만 표시 (너무 길어짐 방지)
+                display_results = search_results.head(10)
                 
-                # 3열 그리드 생성 (한 줄에 3개씩)
-                cols_count = 3
-                rows = [results_to_show.iloc[i:i+cols_count] for i in range(0, len(results_to_show), cols_count)]
+                # 리스트 형태로 출력
+                for idx, row in display_results.iterrows():
+                    # 가독성을 위한 컨테이너와 컬럼 배치
+                    with st.container():
+                        c1, c2 = st.columns([0.75, 0.25])
+                        
+                        # 종목 정보 (왼쪽)
+                        with c1:
+                            st.markdown(f"**{row['Name']}** <span style='color:gray; font-size:0.8em;'>({row['Code']})</span>", unsafe_allow_html=True)
+                        
+                        # 담기 버튼 (오른쪽)
+                        with c2:
+                            # 이미 담겼는지 확인
+                            is_added = any(d['code'] == str(row['Code']) for d in st.session_state.search_basket)
+                            
+                            if is_added:
+                                st.button("✅ 담김", key=f"added_{row['Code']}", disabled=True, use_container_width=True)
+                            else:
+                                if st.button("➕ 추가", key=f"add_{row['Code']}", use_container_width=True):
+                                    st.session_state.search_basket.append({
+                                        'code': str(row['Code']),
+                                        'name': row['Name'],
+                                        'rank': row['ActualRank'] if 'ActualRank' in row else 0,
+                                        'shares': row['Shares'] if 'Shares' in row else 0
+                                    })
+                                    st.rerun() # 즉시 갱신
+                        st.markdown("---") # 구분선
                 
-                for row_data in rows:
-                    cols = st.columns(cols_count)
-                    for idx, (i, stock) in enumerate(row_data.iterrows()):
-                        with cols[idx]:
-                            # 카드 형태의 컨테이너 (시각적 구분)
-                            with st.container():
-                                # 버튼(왼쪽) + 텍스트(오른쪽) 레이아웃
-                                c_btn, c_txt = st.columns([0.3, 0.7])
-                                
-                                with c_btn:
-                                    # 이미 담겼는지 확인
-                                    is_added = any(d['code'] == str(stock['Code']) for d in st.session_state.search_basket)
-                                    if is_added:
-                                        st.button("✅", key=f"added_{stock['Code']}", disabled=True, use_container_width=True)
-                                    else:
-                                        if st.button("➕", key=f"add_{stock['Code']}", use_container_width=True):
-                                            st.session_state.search_basket.append({
-                                                'code': str(stock['Code']),
-                                                'name': stock['Name'],
-                                                'rank': stock['ActualRank'] if 'ActualRank' in stock else 0,
-                                                'shares': stock['Shares'] if 'Shares' in stock else 0
-                                            })
-                                            st.rerun() # 클릭 즉시 갱신
-                                
-                                with c_txt:
-                                    st.markdown(f"**{stock['Name']}**")
-                                    st.caption(f"{stock['Code']}")
-                                    
-                if len(search_results) > display_limit:
-                    st.caption(f"...외 {len(search_results)-display_limit}건 생략 (검색어를 더 구체적으로 입력하세요)")
+                if len(search_results) > 10:
+                    st.caption(f"외 {len(search_results)-10}건 생략... (검색어를 더 구체적으로 입력하세요)")
 
         except Exception as e:
             st.error(f"검색 중 오류 발생: {e}")
 
     # 현재 대기 목록 보여주기
-    st.markdown("---")
-    c_head, c_btn = st.columns([4, 1])
-    with c_head:
-        st.subheader(f"📋 분석 대기 목록 ({len(st.session_state.search_basket)}개)")
-    with c_btn:
-        if st.button("🗑️ 목록 초기화"):
-            st.session_state.search_basket = []
-            st.rerun()
+    st.markdown("### 📋 분석 대기 목록")
     
     if len(st.session_state.search_basket) > 0:
-        basket_df = pd.DataFrame(st.session_state.search_basket)
-        st.dataframe(basket_df[['code', 'name', 'rank']], hide_index=True, use_container_width=True)
+        # 보기 좋게 데이터프레임으로 표시
+        basket_display = pd.DataFrame(st.session_state.search_basket)
+        st.dataframe(basket_display[['code', 'name']], column_config={
+            "code": "종목코드",
+            "name": "종목명"
+        }, hide_index=True, use_container_width=True)
+        
+        if st.button("🗑️ 목록 초기화", type="secondary"):
+            st.session_state.search_basket = []
+            st.rerun()
     else:
-        st.info("위에서 종목을 검색하여 [➕] 버튼을 눌러 담아주세요.")
+        st.info("위 검색창에서 종목을 찾아 [➕ 추가] 버튼을 눌러주세요.")
 
 # --- 2. 실행 ---
 st.divider()
 if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width=True):
     
+    # 1. 상위 종목 모드
     if mode == "🏆 시가총액 상위 종목 분석":
         with st.spinner("기초 데이터 준비 중..."):
             df_krx = get_stock_listing()
@@ -433,6 +431,7 @@ if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width
             if skipped_count > 0:
                 st.toast(f"ℹ️ 리츠/인프라 종목 {skipped_count}개 자동 제외됨")
     
+    # 2. 검색 모드
     else:
         if not st.session_state.search_basket:
             st.warning("분석할 종목을 먼저 검색해서 담아주세요.")
@@ -468,6 +467,7 @@ if st.button("🔄 결과 새로고침"): st.rerun()
 if 'analysis_result' in st.session_state and not st.session_state['analysis_result'].empty:
     df = st.session_state['analysis_result']
     
+    # 정렬 로직
     if "괴리율" in sort_opt:
         df = df.sort_values(by='괴리율(%)', ascending=False)
     else:

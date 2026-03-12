@@ -116,13 +116,15 @@ def fetch_stock_data(item):
     
     # 목표(예상치) 데이터
     target_eps, target_bps, target_debt, target_equity = 0.0, 0.0, 0.0, 0.0
-    target_current_debt = 0.0
     
     # 최신 분기 데이터 (예상치 자본 누락 시 대체용)
     quarter_debt, quarter_equity = 0.0, 0.0
+    
+    # [추가] 유동부채 데이터 저장을 위한 변수
     quarter_current_debt = 0.0
     
     try:
+        # 1차 크롤링: 네이버 금융 메인 (일반 재무제표)
         url = f"https://finance.naver.com/item/main.naver?code={code}"
         headers = {
             'User-Agent': 'Mozilla/5.0',
@@ -194,34 +196,54 @@ def fetch_stock_data(item):
                 target_bps = get_data('BPS', target_idx)
                 target_debt = get_data('부채총계', target_idx)
                 target_equity = get_data('자본총계', target_idx)
-                target_current_debt = get_data('유동부채', target_idx)
                 
                 # 3) 최신 분기 데이터
                 quarter_debt = get_data('부채총계', quarter_idx)
                 quarter_equity = get_data('자본총계', quarter_idx)
-                quarter_current_debt = get_data('유동부채', quarter_idx)
                 
                 break
 
-        # --- 적정주가 계산 ---
+        # [추가] 2차 크롤링: FnGuide 상세 재무상태표에서 '유동부채' 콕 집어오기
+        try:
+            fg_url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{code}"
+            fg_res = requests.get(fg_url, headers=headers, timeout=5)
+            fg_dfs = pd.read_html(fg_res.text)
+            
+            for fg_df in fg_dfs:
+                if '유동부채' in fg_df.iloc[:, 0].to_string():
+                    fg_df = fg_df.set_index(fg_df.columns[0])
+                    target_rows = fg_df.index[fg_df.index.str.contains('유동부채', na=False)]
+                    if len(target_rows) > 0:
+                        row_data = fg_df.loc[target_rows[0]]
+                        # 표의 가장 오른쪽(최신 데이터)부터 역순으로 탐색하여 0이 아닌 값 추출
+                        for val in reversed(row_data.values):
+                            c_val = to_float(val)
+                            if c_val > 0:
+                                quarter_current_debt = c_val
+                                break
+                    break
+        except Exception as e:
+            pass
+
+        # --- 적정주가 산출 ---
         # 1. 과년도 적정주가
         fair_prev = calculate_fair_value_v2(prev_eps, prev_bps, prev_debt, prev_equity, shares)
         
-        # 2. 목표 적정주가
+        # 2. 목표 적정주가 (부채 페널티 로직)
         use_debt = target_debt if target_debt > 0 else quarter_debt
         use_equity = target_equity if target_equity > 0 else quarter_equity
         
         fair_target = calculate_fair_value_v2(target_eps, target_bps, use_debt, use_equity, shares)
         
-        # 3. 목표주가 산출: BPS + 10*예상EPS - (유동부채 / 주식수)
-        use_current_debt = target_current_debt if target_current_debt > 0 else quarter_current_debt
+        # 3. [추가] 목표주가 산출: BPS + 10*예상EPS - (유동부채 / 주식수)
+        # FnGuide 데이터 단위가 '억원'이므로 1억을 곱해 원 단위로 환산 후 주식수로 나눔
         target_price_val = 0
         if shares > 0:
-            penalty_current_debt = (use_current_debt * 100000000) / shares
+            penalty_current_debt = (quarter_current_debt * 100000000) / shares
             target_price_val = target_bps + (10 * target_eps) - penalty_current_debt
         else:
             target_price_val = target_bps + (10 * target_eps)
-            
+
         # 괴리율 (목표 적정가 기준)
         gap = 0
         if current_price > 0:

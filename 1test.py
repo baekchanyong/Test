@@ -1,537 +1,340 @@
 import streamlit as st
-import FinanceDataReader as fdr
 import pandas as pd
-import numpy as np
-import time
 import requests
-import re
-from datetime import datetime, timedelta
-import concurrent.futures
+import io
+import time
+from bs4 import BeautifulSoup
 
-# --- [비밀번호 설정 구간 시작] ---
-my_password = "1414"
+# 페이지 기본 설정
+st.set_page_config(page_title="주식탐색기 Ver 1.1", page_icon="📈", layout="wide")
 
-st.set_page_config(page_title="KOSPI 분석기", page_icon="🎨", layout="wide")
+# --- 헤더 ---
+st.title("주식탐색기 Ver 1.1")
+with st.expander("📝 패치노트 (클릭하여 열기)"):
+    st.markdown("""
+    **✅ (26.04.15) Ver 1.0**
+    - 주식탐색기 최초 배포
+    
+    **✅ (26.04.16) Ver 1.1**
+    - KOSDAQ 종목 탐색 기능 추가
+    - 전화 수신, 인터넷 창 닫힘 등 백그라운드 전환 시 Data 일시저장 기능 추가
+    - 기존 탐색 결과에서 이어서 탐색 및 추가 탐색 기능 지원
+    """)
 
-password_input = st.text_input("비밀번호를 입력하세요", type="password")
-
-if password_input != my_password:
-    st.error("비밀번호를 입력하고 엔터를 누르면 실행됩니다.")
-    st.stop()
-
-st.write("🎉 Made By 찬용")
-# --- [비밀번호 설정 구간 끝] ---
-
-
-# --- [CSS] 스타일 적용 ---
+# --- 계산식 안내 ---
+st.markdown("### 🧮 산출 방식 안내")
 st.markdown("""
-<style>
-    .responsive-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        margin-bottom: 1rem;
-    }
-    @media (max-width: 600px) {
-        .responsive-header { font-size: 1.5rem; }
-    }
-    .info-text { font-size: 1rem; line-height: 1.6; }
-    .pastel-blue { color: #5C7CFA; font-weight: bold; }
-    .pastel-red { color: #D47C94; font-weight: bold; }
-    
-    /* 버튼 스타일 조정 */
-    .stButton button {
-        width: 100%;
-        border-radius: 5px;
-        height: 3em;
-    }
-    
-    @media (max-width: 600px) { .info-text { font-size: 0.9rem; } }
-</style>
-""", unsafe_allow_html=True)
+- **적정주가**: `(연간 EPS * 10 or 15) + BPS - 부채 패널티`
+  - 🔻 *부채 패널티 산식* (부채비율 기준)
+    - **100% 이하**: `0` (패널티 없음)
+    - **100% 초과**: `(총부채 - 총자본) / 상장주식수`
+- **목표주가**: `(연간 예상 EPS * 10 or 15) + BPS - (유동부채 / 주식수)`
+- **데이터 출처**: 연간 EPS(최신 실적/예상)
+- **정렬**: 괴리율(10) 낮은 순 (저평가 매력 순)
+""")
 
-# --- 헬퍼 함수 ---
-def to_float(val):
+st.divider()
+
+# --- 상태 관리 초기화 ---
+if 'running' not in st.session_state: st.session_state.running = False
+if 'results' not in st.session_state: st.session_state.results = []
+if 'skipped_results' not in st.session_state: st.session_state.skipped_results = []
+if 'market_df' not in st.session_state: st.session_state.market_df = pd.DataFrame()
+if 'current_idx' not in st.session_state: st.session_state.current_idx = 0
+if 'target_stocks' not in st.session_state: st.session_state.target_stocks = []
+
+# --- 시장(KOSPI/KOSDAQ) 정보 로드 함수 ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_page_data(sosok, page):
+    url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        if pd.isna(val) or val == '' or str(val).strip() == '-': return 0.0
-        clean_val = re.sub(r'[(),%]', '', str(val))
-        return float(clean_val)
-    except: return 0.0
-
-# --- 종목 리스트 로딩 ---
-@st.cache_data
-def get_stock_listing():
-    df = fdr.StockListing('KOSPI')
-    if 'Symbol' in df.columns:
-        df = df.rename(columns={'Symbol': 'Code'})
-    
-    # 데이터 타입 강제 변환
-    if 'Close' in df.columns:
-        df['Close'] = pd.to_numeric(df['Close'], errors='coerce').fillna(0)
-    if 'Marcap' in df.columns:
-        df['Marcap'] = pd.to_numeric(df['Marcap'], errors='coerce').fillna(0)
-
-    if 'Marcap' in df.columns:
-        df = df.sort_values(by='Marcap', ascending=False)
-        df['ActualRank'] = range(1, len(df) + 1)
-        # 주식수 계산
-        df['Shares'] = np.where(df['Close'] > 0, df['Marcap'] / df['Close'], 0)
-    else:
-        df['ActualRank'] = 0
-        df['Shares'] = 0
-    return df
-
-# --- 적정주가 산출 로직 (부채 반영) ---
-def calculate_fair_value_v2(eps, bps, debt_total, equity_total, shares):
-    """
-    공식: EPS * 10 + BPS
-    단, 부채비율(부채/자본) > 100% 인 경우:
-      (EPS * 10 + BPS) - (총부채 - 총자본) / 주식수
-    """
-    if shares <= 0: return 0
-    
-    # 기본 적정가
-    base_price = (eps * 10) + bps
-    
-    # 부채비율 확인
-    if equity_total > 0:
-        debt_ratio = (debt_total / equity_total) * 100
-        if debt_ratio > 100:
-            # 초과 부채 (억원 단위 -> 원 단위 변환: * 1억)
-            excess_debt = (debt_total - equity_total) * 100000000
-            penalty = excess_debt / shares
-            final_price = base_price - penalty
-            return final_price
-            
-    return base_price
-
-# --- 개별 종목 데이터 크롤링 ---
-def fetch_stock_data(item):
-    code, name, rank, shares = item
-    
-    # 초기화
-    current_price = 0.0
-    
-    # 과년도(직전년도) 데이터
-    prev_eps, prev_bps, prev_debt, prev_equity = 0.0, 0.0, 0.0, 0.0
-    
-    # 목표(예상치) 데이터
-    target_eps, target_bps, target_debt, target_equity = 0.0, 0.0, 0.0, 0.0
-    
-    # 최신 분기 데이터 (예상치 자본 누락 시 대체용)
-    quarter_debt, quarter_equity = 0.0, 0.0
-    
-    # [추가] 유동부채 데이터 저장을 위한 변수
-    quarter_current_debt = 0.0
-    
-    try:
-        # 1차 크롤링: 네이버 금융 메인 (일반 재무제표)
-        url = f"https://finance.naver.com/item/main.naver?code={code}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0',
-            'Referer': 'https://finance.naver.com/'
-        }
         res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        table = soup.find('table', {'class': 'type_2'})
+        if not table: return [], False
         
-        # 현재가 파싱
-        try:
-             match = re.search(r'blind">\s*([0-9,]+)\s*<', res.text)
-             if match: current_price = to_float(match.group(1))
-        except: pass
+        data = []
+        has_data = False
+        rows = table.find_all('tr')
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) > 5:
+                a_tag = cols[1].find('a')
+                if a_tag:
+                    name = a_tag.text.strip()
+                    code = a_tag['href'].split('code=')[-1]
+                    close_txt = cols[2].text.strip().replace(',', '')
+                    stocks_txt = cols[7].text.strip().replace(',', '')
+                    if close_txt and stocks_txt:
+                        data.append({
+                            'Code': code, 'Name': name,
+                            'Close': float(close_txt),
+                            'Stocks': float(stocks_txt) * 1000
+                        })
+                        has_data = True
+        return data, has_data
+    except: return [], False
 
-        dfs = pd.read_html(res.text, encoding='cp949')
-        
-        # 재무제표 찾기
-        for df in dfs:
-            if '매출액' in df.iloc[:, 0].to_string() or '영업이익' in df.iloc[:, 0].to_string():
+if st.session_state.market_df.empty:
+    loading_placeholder = st.empty()
+    progress_bar = st.empty()
+    
+    data = []
+    start_time = time.time()
+    
+    total_est = 55
+    current_idx = 0
+    for sosok, market_name in [(0, 'KOSPI'), (1, 'KOSDAQ')]:
+        marcap_rank = 1
+        for page in range(1, 45):
+            current_idx += 1
+            percent = min(current_idx / total_est, 1.0)
+            elapsed = time.time() - start_time
+            if current_idx > 1:
+                eta = elapsed / current_idx * (total_est - current_idx)
+            else:
+                eta = 0
                 
-                # 인덱스 정리
-                df = df.set_index(df.columns[0])
-                
-                # 컬럼명 리스트
-                if isinstance(df.columns, pd.MultiIndex):
-                     cols = [str(c[1]) for c in df.columns]
-                else:
-                     cols = [str(c) for c in df.columns]
-                
-                # (E)가 있는 연간 컬럼 찾기
-                est_idx = -1
-                for i, c in enumerate(cols):
-                    if '(E)' in c and re.search(r'\d{4}\.\d{2}', c):
-                        est_idx = i
-                        break
-                
-                # 직전년도(확정) 인덱스 찾기
-                prev_idx = -1
-                if est_idx != -1:
-                    prev_idx = est_idx - 1
-                else:
-                    for i in range(len(cols)-1, -1, -1):
-                        if re.match(r'\d{4}\.\d{2}', cols[i]) and '(E)' not in cols[i]:
-                            if i < 4: 
-                                prev_idx = i
-                                break
-                    if prev_idx == -1: prev_idx = 3 
-
-                quarter_idx = len(cols) - 1
-
-                # 데이터 추출 헬퍼
-                def get_data(row_name, col_idx):
-                    if col_idx < 0 or col_idx >= len(cols): return 0.0
-                    try:
-                        target_rows = df.index[df.index.str.contains(row_name, na=False)]
-                        if len(target_rows) > 0:
-                            return to_float(df.iloc[df.index.get_loc(target_rows[0]), col_idx])
-                    except: pass
-                    return 0.0
-
-                # 1) 과년도 데이터 추출
-                prev_eps = get_data('EPS', prev_idx)
-                prev_bps = get_data('BPS', prev_idx)
-                prev_debt = get_data('부채총계', prev_idx)
-                prev_equity = get_data('자본총계', prev_idx)
-                
-                # 2) 목표(예상) 데이터 추출
-                target_idx = est_idx if est_idx != -1 else prev_idx
-                target_eps = get_data('EPS', target_idx)
-                target_bps = get_data('BPS', target_idx)
-                target_debt = get_data('부채총계', target_idx)
-                target_equity = get_data('자본총계', target_idx)
-                
-                # 3) 최신 분기 데이터
-                quarter_debt = get_data('부채총계', quarter_idx)
-                quarter_equity = get_data('자본총계', quarter_idx)
-                
+            eta_val = max(0, int(eta))
+            if eta_val > 0:
+                loading_placeholder.markdown(f"### ⏳ Data Loading 중... (예상 남은 시간: {eta_val}초)")
+            else:
+                loading_placeholder.markdown("### ⏳ Data 최종 정리중...")
+            progress_bar.progress(percent)
+            
+            page_data, has_data = fetch_page_data(sosok, page)
+            if not has_data:
                 break
-
-        # [추가] 2차 크롤링: FnGuide 상세 재무상태표에서 '유동부채' 콕 집어오기
-        try:
-            fg_url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{code}"
-            fg_res = requests.get(fg_url, headers=headers, timeout=5)
-            fg_dfs = pd.read_html(fg_res.text)
             
-            for fg_df in fg_dfs:
-                if '유동부채' in fg_df.iloc[:, 0].to_string():
-                    fg_df = fg_df.set_index(fg_df.columns[0])
-                    target_rows = fg_df.index[fg_df.index.str.contains('유동부채', na=False)]
-                    if len(target_rows) > 0:
-                        row_data = fg_df.loc[target_rows[0]]
-                        # 표의 가장 오른쪽(최신 데이터)부터 역순으로 탐색하여 0이 아닌 값 추출
-                        for val in reversed(row_data.values):
-                            c_val = to_float(val)
-                            if c_val > 0:
-                                quarter_current_debt = c_val
-                                break
-                    break
-        except Exception as e:
-            pass
+            for item in page_data:
+                item['Market'] = market_name
+                item['Marcap_Rank'] = marcap_rank
+                data.append(item)
+                marcap_rank += 1
+                
+    st.session_state.market_df = pd.DataFrame(data)
+    loading_placeholder.empty()
+    progress_bar.empty()
+    st.rerun()
 
-        # --- 적정주가 산출 ---
-        # 1. 과년도 적정주가
-        fair_prev = calculate_fair_value_v2(prev_eps, prev_bps, prev_debt, prev_equity, shares)
-        
-        # 2. 목표 적정주가 (부채 페널티 로직)
-        use_debt = target_debt if target_debt > 0 else quarter_debt
-        use_equity = target_equity if target_equity > 0 else quarter_equity
-        
-        fair_target = calculate_fair_value_v2(target_eps, target_bps, use_debt, use_equity, shares)
-        
-        # 3. [추가] 목표주가 산출: BPS + 10*예상EPS - (유동부채 / 주식수)
-        # FnGuide 데이터 단위가 '억원'이므로 1억을 곱해 원 단위로 환산 후 주식수로 나눔
-        target_price_val = 0
-        if shares > 0:
-            penalty_current_debt = (quarter_current_debt * 100000000) / shares
-            target_price_val = target_bps + (10 * target_eps) - penalty_current_debt
-        else:
-            target_price_val = target_bps + (10 * target_eps)
-
-        # 괴리율 (목표 적정가 기준)
-        gap = 0
-        if current_price > 0:
-            gap = (fair_target - current_price) / current_price * 100
-            
-        # 정렬용
-        diff_val = current_price - fair_prev
-
-        return {
-            'code': code, 'name': name, 'rank': rank,
-            'price': current_price,
-            'fair_prev': fair_prev, 'fair_target': fair_target,
-            'target_price': target_price_val,
-            'gap': gap, 'diff_val': diff_val
-        }
-
-    except Exception as e:
+# --- 스크래핑 및 계산 함수 ---
+def safe_float(val):
+    try:
+        if pd.isna(val): return None
+        v = str(val).replace(',', '').strip()
+        if not v or v == '-' or v == 'N/A': return None
+        return float(v)
+    except:
         return None
 
-# --- 분석 실행 (병렬) ---
-def run_analysis_parallel(target_list, status_text, progress_bar, worker_count):
-    results = []
-    total = len(target_list)
+def analyze_stock(ticker, name, market, current_price, shares, marcap_rank, filters):
+    is_pref = not str(ticker).endswith('0') or name.endswith('우') or '우(' in name or '우B' in name
+    if is_pref:
+        return None, {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "제외사유": "우선주 제외"}
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = {executor.submit(fetch_stock_data, item): item for item in target_list}
+    is_etf = any(k in name for k in ['KODEX', 'TIGER', 'KBSTAR', 'KINDEX', 'ARIRANG', 'KOSEF', 'HANARO', 'ACE', 'SOL', 'TIMEFOLIO', 'FOCUS', '마이티', 'TREX', '히어로즈', 'VITA']) or name.endswith('ETF')
+    if filters.get('etf', True) and is_etf:
+        return None, {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "제외사유": "ETF 제외"}
+    
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    url_fin = f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{ticker}"
+    url_main = f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A{ticker}"
+    
+    t_equity = 0.0; t_debt = 0.0; c_liab = 0.0; a_eps = 0.0; past_eps = 0.0; q_eps = 0.0; bps = 0.0; op_profit = 0.0; is_future_eps = False
+    try:
+        res_fin = requests.get(url_fin, headers=headers, timeout=5)
+        res_fin.encoding = 'utf-8'
+        tables_fin = pd.read_html(io.StringIO(res_fin.text))
+        df_bs = tables_fin[2]
+        for _, row in df_bs.iterrows():
+            nm = str(row.iloc[0]).replace('\xa0', ' ').replace(' ', '').strip()
+            if nm in ['자본', '자본총계'] and t_equity == 0: 
+                for v in row.values[::-1]:
+                    vf = safe_float(v)
+                    if vf is not None: t_equity = vf * 100000000; break
+            if nm in ['부채', '부채총계'] and t_debt == 0: 
+                for v in row.values[::-1]:
+                    vf = safe_float(v)
+                    if vf is not None: t_debt = vf * 100000000; break
+            if '유동부채' in nm and '비유동' not in nm and c_liab == 0: 
+                for v in row.values[::-1]:
+                    vf = safe_float(v)
+                    if vf is not None: c_liab = vf * 100000000; break
+    except: return None, {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "제외사유": "재무 데이터 로드 오류"}
         
-        completed_count = 0
-        for future in concurrent.futures.as_completed(futures):
-            data = future.result()
-            completed_count += 1
-            progress_bar.progress(min(completed_count / total, 1.0))
-            
-            if data and data['price'] > 0:
-                status_text.text(f"⚡ [{completed_count}/{total}] {data['name']} 분석 완료")
-                
-                results.append({
-                    '종목코드': data['code'],
-                    '종목명': data['name'],
-                    '시총순위': data['rank'],
-                    '과년도 적정주가': round(data['fair_prev'], 0),
-                    '현재가': round(data['price'], 0),
-                    '적정주가': round(data['fair_target'], 0),
-                    '목표주가': round(data['target_price'], 0),
-                    '괴리율(%)': round(data['gap'], 2),
-                    'Gap_Prev': data['diff_val']
-                })
+    try:
+        res_main = requests.get(url_main, headers=headers, timeout=5)
+        res_main.encoding = 'utf-8'
+        tables_main = pd.read_html(io.StringIO(res_main.text))
+        for df in tables_main:
+            if df.columns.nlevels > 1:
+                col_types = [str(c[0]).strip() for c in df.columns]
+                col_names = [str(c[1]).strip() for c in df.columns]
+                for _, row in df.iterrows():
+                    nm = str(row.iloc[0]).replace('\xa0', ' ').replace(' ', '').strip()
+                    if 'EPS(원)' in nm:
+                        annuals = []
+                        for j in range(len(row)-1, 0, -1):
+                            val = safe_float(row.iloc[j])
+                            if val is not None:
+                                if 'Annual' in col_types[j]:
+                                    annuals.append((val, '(E)' in col_names[j]))
+                                elif 'NetQuarter' in col_types[j].replace(' ', '') and q_eps == 0:
+                                    q_eps = val
+                        if annuals:
+                            a_eps = annuals[0][0]
+                            is_future_eps = annuals[0][1]
+                            if len(annuals) > 1: past_eps = annuals[1][0]
+                            else: past_eps = a_eps
+                    elif 'BPS(원)' in nm and bps == 0:
+                        for j in range(len(row)-1, 0, -1):
+                            val = safe_float(row.iloc[j])
+                            if val is not None and ('Annual' in col_types[j] or 'NetQuarter' in col_types[j].replace(' ', '')):
+                                bps = val
+                                break
+                    elif '영업이익' in nm and op_profit == 0:
+                        for j in range(len(row)-1, 0, -1):
+                            val = safe_float(row.iloc[j])
+                            if val is not None and 'Annual' in col_types[j]:
+                                op_profit = val
+                                break
+            if a_eps != 0 and q_eps != 0 and bps != 0: break
+    except: return None, {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "제외사유": "재무 데이터 파싱 오류"}
 
-    progress_bar.empty()
-    if results:
-        st.session_state['analysis_result'] = pd.DataFrame(results)
-        return True
-    return False
+    if a_eps == 0 or bps == 0 or t_equity == 0: return None, {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "제외사유": "필요 데이터 누락"}
+    if q_eps == 0: q_eps = a_eps / 4
 
-# --- 메인 UI ---
-st.markdown("<div class='responsive-header'>⚖️ KOSPI 분석기 1.1Ver</div>", unsafe_allow_html=True)
-
-# 1. 설명서
-with st.expander("📘 **공지사항 & 산출공식**", expanded=True):
-    st.markdown("""
-    <div class='info-text'>
-    <span class='pastel-blue'>산출공식 (부채비율 반영)</span><br>
-    <b>1. 기본 공식 (부채비율 100% 이하)</b><br>
-    &nbsp; • 적정주가 = <b>(EPS × 10) + BPS</b><br><br>
+    d_ratio = (t_debt / t_equity) * 100
+    pnlty = ((t_debt - t_equity) / shares) if d_ratio > 100 else 0
+    p10 = (a_eps * 10) + bps - pnlty
+    p15 = (a_eps * 15) + bps - pnlty
+    t10 = (a_eps * 10) + bps - (c_liab / shares)
+    t15 = (a_eps * 15) + bps - (c_liab / shares)
     
-    <b>2. 부채 과다 페널티 (부채비율 100% 초과)</b><br>
-    &nbsp; • 적정주가 = (EPS × 10) + BPS - <b>[(총부채 - 총자본) ÷ 주식수]</b><br>
-
-    <span class='pastel-blue'>데이터 기준</span><br>
-    &nbsp; • <b>과년도 적정주가:</b> 직전년도 확정 실적 기준<br>
-    &nbsp; • <b>적정주가 (Target):</b> 네이버 연간 예상치(컨센서스) 기준<br>
-    &nbsp; (※ 예상치 부채정보 부재 시 최신 분기 데이터 사용)
-    </div>
-    """, unsafe_allow_html=True)
-
-# 2. 패치노트
-with st.expander("🛠️ **패치노트**", expanded=False):
-    st.markdown("""
-    <div class='info-text'>
+    past_p10 = (past_eps * 10) + bps - pnlty
+    past_t10 = (past_eps * 10) + bps - (c_liab / shares)
+    past_t15 = (past_eps * 15) + bps - (c_liab / shares)
     
-    <b>(25.11.26) 1.0Ver : 최초배포</b><br>
-    &nbsp; • 분석 제외종목 : 맥쿼리인프라, SK리츠, 제이알글로벌리츠, 롯데리츠, ESR켄달스퀘어리츠, 신한알파리츠, 맵스리얼티1, 이리츠코크렙, 코람코에너지리츠<br>
-    &nbsp;   - 일반제조업과 회계방식차이로 인하여 과도하게 저평가되는 종목들 제외<br>
-    &nbsp; • 시총순위 : ETF(KODEX200 등) 제외한 시가총액 순위<br>
-      
-    <b>(25.11.26) 1.1Ver : 적정주가 산출방식 변경</b><br>
-    &nbsp; • 적정주가 수식 변경<br>
-    &nbsp;   - 공포지수, eps,bps반영율 변경<br>
-    &nbsp; • 종목 검색기능 추가<br>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.divider()
-
-# --- 1. 설정 ---
-st.header("1. 분석 설정")
-
-speed_option = st.radio(
-    "분석 속도 설정",
-    ["빠른 분석 (15개씩)", "보통 분석 (8개씩)", "느린 분석 (2개씩)"],
-    index=1
-)
-worker_count = 15 if "빠른" in speed_option else (8 if "보통" in speed_option else 2)
-
-st.divider()
-
-# 분석 모드 선택
-mode = st.radio("분석 모드 선택", ["🏆 시가총액 상위 종목 분석", "🔍 특정 종목 검색/추천 분석"], horizontal=True)
-
-target_list = [] 
-
-if mode == "🏆 시가총액 상위 종목 분석":
-    st.write("📊 **분석할 상위 종목 수 설정**")
-    if 'stock_count' not in st.session_state: st.session_state.stock_count = 200 
-
-    def update_from_slider(): st.session_state.stock_count = st.session_state.slider_key
-    def apply_manual_input(): st.session_state.stock_count = st.session_state.num_input
-
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        st.slider("종목 수 조절", 10, 400, key='slider_key', value=st.session_state.stock_count, on_change=update_from_slider)
-    with c2:
-        st.number_input("직접 입력", 10, 400, key='num_key', value=st.session_state.stock_count)
-        if st.button("✅ 수치 적용", on_click=apply_manual_input): st.rerun()
-
-elif mode == "🔍 특정 종목 검색/추천 분석":
-    if 'search_basket' not in st.session_state:
-        st.session_state.search_basket = []
-
-    search_query = st.text_input("종목명 검색", placeholder="예: 삼성, 현대, 카카오")
+    reason = None
+    if a_eps <= 0 and filters.get('eps_neg', True): reason = "적자 기업 (EPS < 0)"
+    elif t10 <= 0 and filters.get('target_neg', True): reason = "목표주가 음수"
+    elif p10 <= 0 and filters.get('target_neg', True): reason = "적정주가 음수"
+    elif (a_eps * 10) < bps and filters.get('eps10_bps', True): reason = "EPS*10 < BPS"
+    elif op_profit < 0 and filters.get('op_neg', True): reason = "영업이익 적자"
     
-    # [UI 수정] 그리드 형태의 검색 결과
-    if search_query:
-        try:
-            df_krx = get_stock_listing()
-            search_results = df_krx[df_krx['Name'].str.contains(search_query, case=False)]
-            
-            if search_results.empty:
-                st.error(f"❌ '{search_query}' 검색 결과가 없습니다.")
-            else:
-                st.write(f"🔎 검색 결과: {len(search_results)}건")
-                display_limit = 18 # 3의 배수로 설정
-                results_to_show = search_results.head(display_limit)
-                
-                # 3열 그리드로 표시
-                cols = st.columns(3)
-                for idx, row in results_to_show.iterrows():
-                    # 인덱스에 따라 0, 1, 2 컬럼에 배분
-                    col_idx = list(results_to_show.index).index(idx) % 3
-                    
-                    with cols[col_idx]:
-                        with st.container():
-                            # 버튼을 왼쪽에 배치하기 위해 컬럼 분할
-                            # c_btn(0.25) | c_info(0.75)
-                            c_btn, c_info = st.columns([0.25, 0.75])
-                            
-                            is_added = any(d['code'] == str(row['Code']) for d in st.session_state.search_basket)
-                            
-                            with c_btn:
-                                if is_added:
-                                    st.button("✅", key=f"added_{row['Code']}", disabled=True)
-                                else:
-                                    if st.button("➕", key=f"add_{row['Code']}"):
-                                        st.session_state.search_basket.append({
-                                            'code': str(row['Code']),
-                                            'name': row['Name'],
-                                            'rank': row['ActualRank'] if 'ActualRank' in row else 0,
-                                            'shares': row['Shares'] if 'Shares' in row else 0
-                                        })
-                                        st.rerun()
-                            
-                            with c_info:
-                                st.markdown(f"**{row['Name']}**")
-                                st.caption(f"{row['Code']}")
-                                
-                        st.markdown("---") # 구분선
+    data = {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "적정주가(10)": p10, "목표주가(10)": t10, "괴리율(10)": ((p10 - current_price) / current_price) * 100 if p10 > 0 else 0, "적정주가(15)": p15, "목표주가(15)": t15, "EPS": a_eps, "추정EPS여부": is_future_eps, "BPS": bps, "과거적정주가": past_p10, "과거목표주가(10)": past_t10, "과거목표주가(15)": past_t15, "부채비율(%)": d_ratio, "총부채_원": t_debt, "유동부채_원": c_liab, "총자본_원": t_equity, "상장주식수_원": shares}
+    if reason:
+        data["제외사유"] = reason
+        return (None, data)
+    return (data, None)
 
-                if len(search_results) > display_limit:
-                    st.caption(f"외 {len(search_results)-display_limit}건 생략... (검색어를 더 구체적으로 입력하세요)")
+# --- UI 설정 ---
+market_df = st.session_state.market_df
+if not market_df.empty:
+    st.markdown("### ⚙️ 탐색 모드 설정")
+    top_n = 50
+    selected_custom = []
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        search_mode = st.radio("모드를 선택하세요:", ("KOSPI 전체 탐색", "KOSPI 상위 N개 탐색", "KOSDAQ 전체 탐색", "KOSDAQ 상위 N개 탐색", "사용자 지정 탐색"))
+    with col2:
+        if "상위 N개" in search_mode:
+            cur_market = "KOSPI" if "KOSPI" in search_mode else "KOSDAQ"
+            max_len = len(market_df[market_df['Market'] == cur_market])
+            top_n = st.number_input("탐색 개수:", min_value=1, max_value=max_len if max_len > 0 else 1, value=50 if max_len >= 50 else max_len)
+        elif search_mode == "사용자 지정 탐색":
+            selected_custom = st.multiselect("종목 선택:", market_df['Name'].tolist())
 
-        except Exception as e:
-            st.error(f"검색 중 오류 발생: {e}")
+    st.markdown("### 🔍 탐색 필터 (체크 시 분석에서 제외)")
+    col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
+    with col_f1: st.checkbox("목표주가 음수", value=True, key="filter_target_neg")
+    with col_f2: st.checkbox("EPS 음수", value=True, key="filter_eps_neg")
+    with col_f3: st.checkbox("EPS*10 < BPS", value=True, key="filter_eps10_bps")
+    with col_f4: st.checkbox("영업이익 적자", value=True, key="filter_op_neg")
+    with col_f5: st.checkbox("ETF 종목", value=True, key="filter_etf")
 
-    # 현재 대기 목록 보여주기
-    st.markdown("### 📋 분석 대기 목록")
+    st.divider()
     
-    if len(st.session_state.search_basket) > 0:
-        basket_df = pd.DataFrame(st.session_state.search_basket)
-        st.dataframe(basket_df[['code', 'name', 'rank']], hide_index=True, use_container_width=True)
-        
-        if st.button("🗑️ 목록 초기화", type="secondary"):
-            st.session_state.search_basket = []
+    def get_targets():
+        if search_mode == "KOSPI 전체 탐색": return market_df[market_df['Market'] == 'KOSPI'].to_dict('records')
+        elif search_mode == "KOSDAQ 전체 탐색": return market_df[market_df['Market'] == 'KOSDAQ'].to_dict('records')
+        elif search_mode == "KOSPI 상위 N개 탐색": return market_df[market_df['Market'] == 'KOSPI'].head(top_n).to_dict('records')
+        elif search_mode == "KOSDAQ 상위 N개 탐색": return market_df[market_df['Market'] == 'KOSDAQ'].head(top_n).to_dict('records')
+        else: return market_df[market_df['Name'].isin(selected_custom)].to_dict('records')
+
+    btn_col1, btn_col2, btn_col3, _ = st.columns([1, 1.2, 1, 1.8])
+    with btn_col1:
+        if st.button("🚀 새로 탐색", disabled=st.session_state.running):
+            st.session_state.target_stocks = get_targets()
+            st.session_state.results = []; st.session_state.skipped_results = []; st.session_state.current_idx = 0
+            if len(st.session_state.target_stocks) > 0: st.session_state.running = True
             st.rerun()
-    else:
-        st.info("위 검색창에서 종목을 찾아 [➕] 버튼을 눌러주세요.")
-
-# --- 2. 실행 ---
-st.divider()
-if st.button("▶️ 분석 시작 (Start)", type="primary", use_container_width=True):
-    
-    # 1. 상위 종목 모드
-    if mode == "🏆 시가총액 상위 종목 분석":
-        with st.spinner("기초 데이터 준비 중..."):
-            df_krx = get_stock_listing()
-            top_n = df_krx.head(st.session_state.stock_count)
-            target_list = []
+    with btn_col2:
+        if st.button("▶️ 이어서/추가 탐색", disabled=st.session_state.running):
+            new_targets = get_targets()
             
-            skipped_count = 0
-            for i, (idx, row) in enumerate(top_n.iterrows()):
-                name = row['Name']
-                if name in ["맥쿼리인프라", "SK리츠", "제이알글로벌리츠", "롯데리츠", "ESR켄달스퀘어리츠", "신한알파리츠", "맵스리얼티1", "이리츠코크렙", "코람코에너지리츠"]:
-                    skipped_count += 1
-                    continue
-                
-                rank_val = row['ActualRank'] if 'ActualRank' in row else i+1
-                shares = row['Shares'] if 'Shares' in row else 0
-                target_list.append((str(row['Code']), name, rank_val, shares))
+            existing_codes = set([s['Code'] for s in st.session_state.target_stocks])
+            for stock in new_targets:
+                if stock['Code'] not in existing_codes:
+                    st.session_state.target_stocks.append(stock)
             
-            if skipped_count > 0:
-                st.toast(f"ℹ️ 리츠/인프라 종목 {skipped_count}개 자동 제외됨")
-    
-    # 2. 검색 모드
-    else:
-        if not st.session_state.search_basket:
-            st.warning("분석할 종목을 먼저 검색해서 담아주세요.")
-            st.stop()
-        
-        target_list = [
-            (item['code'], item['name'], item['rank'], item['shares']) 
-            for item in st.session_state.search_basket
-        ]
+            if st.session_state.current_idx < len(st.session_state.target_stocks):
+                st.session_state.running = True
+            st.rerun()
+    with btn_col3:
+        if st.button("⏹️ 일시정지", disabled=not st.session_state.running):
+            st.session_state.running = False; st.rerun()
 
-    if not target_list:
-        st.warning("분석할 종목이 없습니다.")
-        st.stop()
+    progress_container = st.empty(); status_text = st.empty()
 
-    status_box = st.empty()
-    p_bar = st.progress(0)
-    
-    is_success = run_analysis_parallel(target_list, status_box, p_bar, worker_count)
-    
-    if is_success:
-        status_box.success(f"✅ 분석 완료!")
-        time.sleep(0.5)
-        st.rerun()
+    def render_result_table():
+        def fmt_curr(v): return f"{v/1e8:,.1f}"
+        if len(st.session_state.results) > 0:
+            st.markdown("### 🏆 탐색 결과")
+            df = pd.DataFrame(st.session_state.results).sort_values("괴리율(10)", ascending=False).reset_index(drop=True)
+            res = pd.DataFrame()
+            res["시장"] = df.get("시장", "KOSPI"); res["순위"] = df.index+1; res["종목"] = df["종목명"]; res["시총순위"] = df["시총순위"]; res["현재주가(원)"] = df["현재주가"].apply(lambda x: f"{x:,.0f}")
+            res["적정주가(10, 원)"] = df["적정주가(10)"].apply(lambda x: f"{x:,.0f}"); res["목표주가(10, 원)"] = df["목표주가(10)"].apply(lambda x: f"{x:,.0f}")
+            res["괴리율(10, %)"] = df["괴리율(10)"].apply(lambda x: f"{x:.2f}"); res["적정주가(15, 원)"] = df["적정주가(15)"].apply(lambda x: f"{x:,.0f}"); res["목표주가(15, 원)"] = df["목표주가(15)"].apply(lambda x: f"{x:,.0f}")
+            res["EPS(원)"] = df["EPS"].apply(lambda x: f"{x:,.0f}"); res["BPS(원)"] = df["BPS"].apply(lambda x: f"{x:,.0f}")
+            res["과거 적정주가"] = df["과거적정주가"].apply(lambda x: f"{x:,.0f}"); res["과거목표주가(10)"] = df["과거목표주가(10)"].apply(lambda x: f"{x:,.0f}"); res["과거목표주가(15)"] = df["과거목표주가(15)"].apply(lambda x: f"{x:,.0f}")
+            res["부채비율(%)"] = df["부채비율(%)"].apply(lambda x: f"{x:.2f}")
+            res["총부채(억원)"] = df["총부채_원"].apply(fmt_curr); res["유동부채(억원)"] = df["유동부채_원"].apply(fmt_curr); res["총자본(억원)"] = df["총자본_원"].apply(fmt_curr); res["주식수(만개)"] = df["상장주식수_원"].apply(lambda x: f"{x/1e4:,.0f}")
 
-# --- 3. 결과 ---
-st.divider()
-st.header("🏆 분석 결과")
+            def highlight_eps_cols(row):
+                styles = [''] * len(row)
+                original_idx = row.name
+                if df.get("추정EPS여부", pd.Series([False]*len(df))).iloc[original_idx]:
+                    for col_name in ['적정주가(10, 원)', '목표주가(10, 원)', '적정주가(15, 원)', '목표주가(15, 원)', 'EPS(원)']:
+                        if col_name in row.index:
+                            styles[row.index.get_loc(col_name)] = 'color: #cda8ff;'
+                return styles
+            
+            styled_res = res.style.apply(highlight_eps_cols, axis=1)
+            st.dataframe(styled_res, use_container_width=True, hide_index=True)
+        if len(st.session_state.skipped_results) > 0:
+            with st.expander("🚫 분석 제외 종목", expanded=True):
+                dfS = pd.DataFrame(st.session_state.skipped_results).sort_values("시총순위")
+                skip = pd.DataFrame()
+                skip["시장"] = dfS.get("시장", "KOSPI"); skip["종목"] = dfS["종목명"]; skip["시총순위"] = dfS["시총순위"]; skip["사유"] = dfS.get("제외사유", "데이터 오류"); skip["현재주가(원)"] = dfS["현재주가"].apply(lambda x: f"{float(x):,.0f}")
+                st.dataframe(skip, use_container_width=True, hide_index=True)
 
-sort_opt = st.radio("정렬 기준", ["괴리율 높은 순 (저평가)", "📉 저평가 심화 순 (현재가-과년도적정가)"], horizontal=True)
-
-if st.button("🔄 결과 새로고침"): st.rerun()
-
-if 'analysis_result' in st.session_state and not st.session_state['analysis_result'].empty:
-    df = st.session_state['analysis_result']
-    
-    # 정렬 로직
-    if "괴리율" in sort_opt:
-        df = df.sort_values(by='괴리율(%)', ascending=False)
-    else:
-        df = df.sort_values(by='Gap_Prev', ascending=True)
-    
-    df = df.reset_index(drop=True)
-    df.index += 1
-    df.index.name = "순위"
-    
-    cols = ['시총순위', '과년도 적정주가', '현재가', '적정주가', '목표주가', '괴리율(%)']
-    df_display = df.set_index('종목명', append=True)
-    
-    top = df.iloc[0]
-    st.info(f"🥇 **1위: {top['종목명']}** (시총 {top['시총순위']}위) | 괴리율: {top['괴리율(%)']}%")
-
-    def style_dataframe(row):
-        styles = []
-        for col in row.index:
-            style = '' 
-            if col == '괴리율(%)':
-                val = row['괴리율(%)']
-                if val > 20: style = 'color: #D47C94; font-weight: bold;' 
-                elif val < 0: style = 'color: #5C7CFA; font-weight: bold;' 
-            styles.append(style)
-        return styles
-
-    st.dataframe(
-        df_display[cols].style.apply(style_dataframe, axis=1).format("{:,.0f}", subset=['과년도 적정주가', '현재가', '적정주가', '목표주가']),
-        height=800,
-        use_container_width=True
-    )
-else:
-    st.info("👈 위에서 [분석 시작] 버튼을 눌러주세요.")
+    if st.session_state.running:
+        total = len(st.session_state.target_stocks)
+        prog = progress_container.progress(0.0)
+        for i, stock in enumerate(st.session_state.target_stocks[st.session_state.current_idx:], start=st.session_state.current_idx):
+            prog.progress((i)/total); status_text.markdown(f"**진행중:** {i}/{total} ({stock['Name']})")
+            filters = {
+                'target_neg': st.session_state.get('filter_target_neg', True),
+                'eps_neg': st.session_state.get('filter_eps_neg', True),
+                'eps10_bps': st.session_state.get('filter_eps10_bps', True),
+                'op_neg': st.session_state.get('filter_op_neg', True),
+                'etf': st.session_state.get('filter_etf', True)
+            }
+            res, extra = analyze_stock(stock['Code'], stock['Name'], stock.get('Market', 'KOSPI'), float(stock['Close']), float(stock['Stocks']), stock['Marcap_Rank'], filters)
+            if res: st.session_state.results.append(res)
+            else: st.session_state.skipped_results.append(extra)
+            render_result_table(); st.session_state.current_idx = i + 1; time.sleep(0.3)
+        st.session_state.running = False; progress_container.empty(); status_text.success("완료!"); st.rerun()
+    else: render_result_table()

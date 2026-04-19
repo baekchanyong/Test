@@ -6,10 +6,10 @@ import time
 from bs4 import BeautifulSoup
 
 # 페이지 기본 설정
-st.set_page_config(page_title="주식탐색기 Ver 1.1", page_icon="📈", layout="wide")
+st.set_page_config(page_title="주식탐색기 Ver 1.2", page_icon="📈", layout="wide")
 
 # --- 헤더 ---
-st.title("주식탐색기 Ver 1.1")
+st.title("주식탐색기 Ver 1.2")
 with st.expander("📝 패치노트 (클릭하여 열기)"):
     st.markdown("""
     **✅ (26.04.15) Ver 1.0**
@@ -19,6 +19,9 @@ with st.expander("📝 패치노트 (클릭하여 열기)"):
     - KOSDAQ 종목 탐색 기능 추가
     - 전화 수신, 인터넷 창 닫힘 등 백그라운드 전환 시 Data 일시저장 기능 추가
     - 기존 탐색 결과에서 이어서 탐색 및 추가 탐색 기능 지원
+    
+    **✅ (26.04.17) Ver 1.2**
+    - 탐색필터 추가, 과거 적정주가, 목표주가 추가, 탐색결과표 디자인 개선
     """)
 
 # --- 계산식 안내 ---
@@ -321,10 +324,39 @@ if not market_df.empty:
             def highlight_eps_cols(row):
                 styles = [''] * len(row)
                 original_idx = row.name
+                
+                # 행 짝수/홀수 구분 (스트라이프 배경으로 주식별 구분)
+                is_even = (original_idx % 2 == 0)
+                base_bg = 'background-color: rgba(128, 128, 128, 0.05); ' if is_even else 'background-color: transparent; '
+                
+                # 데이터 그룹별 배경색 (현재 데이터=옅은 파랑톤, 과거 데이터=옅은 오렌지/갈색톤)
+                group1_bg = 'background-color: rgba(60, 130, 250, 0.12); ' if is_even else 'background-color: rgba(60, 130, 250, 0.05); '
+                group2_bg = 'background-color: rgba(250, 130, 60, 0.12); ' if is_even else 'background-color: rgba(250, 130, 60, 0.05); '
+                
+                group1_cols = ['적정주가(10, 원)', '목표주가(10, 원)', '괴리율(10, %)', '적정주가(15, 원)', '목표주가(15, 원)', 'EPS(원)', 'BPS(원)']
+                group2_cols = ['과거 적정주가', '과거목표주가(10)', '과거목표주가(15)', '과거 EPS(원)', '과거 BPS(원)']
+                
+                text_color = ''
                 if df.get("추정EPS여부", pd.Series([False]*len(df))).iloc[original_idx]:
-                    for col_name in ['적정주가(10, 원)', '목표주가(10, 원)', '적정주가(15, 원)', '목표주가(15, 원)', 'EPS(원)']:
-                        if col_name in row.index:
-                            styles[row.index.get_loc(col_name)] = 'color: #cda8ff;'
+                    text_color = 'color: #cda8ff; font-weight: bold; '
+                
+                for i, col_name in enumerate(row.index):
+                    cell_style = base_bg
+                    
+                    if col_name in group1_cols:
+                        cell_style = group1_bg
+                        if col_name == '적정주가(10, 원)': cell_style += 'border-left: 2px solid rgba(128,128,128,0.2); '
+                        if col_name == 'BPS(원)': cell_style += 'border-right: 2px solid rgba(128,128,128,0.2); '
+                    elif col_name in group2_cols:
+                        cell_style = group2_bg
+                        if col_name == '과거 적정주가': cell_style += 'border-left: 2px solid rgba(128,128,128,0.2); '
+                        if col_name == '과거 BPS(원)': cell_style += 'border-right: 2px solid rgba(128,128,128,0.2); '
+                    
+                    if col_name in ['적정주가(10, 원)', '목표주가(10, 원)', '적정주가(15, 원)', '목표주가(15, 원)', 'EPS(원)'] and text_color != '':
+                        cell_style += text_color
+                        
+                    styles[i] = cell_style
+                    
                 return styles
             
             styled_res = res.style.apply(highlight_eps_cols, axis=1)

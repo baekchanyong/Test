@@ -21,7 +21,8 @@ with st.expander("📝 패치노트 (클릭하여 열기)"):
     - 기존 탐색 결과에서 이어서 탐색 및 추가 탐색 기능 지원
     
     **✅ (26.04.17) Ver 1.2**
-    - 탐색필터 추가, 과거 적정주가, 목표주가 추가, 탐색결과표 디자인 개선
+    - 탐색필터 및 과거 적정주가, 목표주가 도출 로직 추가
+    - 탐색결과표 시각적 디자인 개편 및 UI 편의성 개선
     """)
 
 # --- 계산식 안내 ---
@@ -321,9 +322,12 @@ if not market_df.empty:
             res["부채비율(%)"] = df["부채비율(%)"].apply(lambda x: f"{x:.2f}")
             res["총부채(억원)"] = df["총부채_원"].apply(fmt_curr); res["유동부채(억원)"] = df["유동부채_원"].apply(fmt_curr); res["총자본(억원)"] = df["총자본_원"].apply(fmt_curr); res["주식수(만개)"] = df["상장주식수_원"].apply(lambda x: f"{x/1e4:,.0f}")
 
+            # 가로 횡스크롤 시 좌측에 고정되도록 인덱스 설정
+            res = res.set_index(["시장", "순위", "종목"])
+
             def highlight_eps_cols(row):
                 styles = [''] * len(row)
-                original_idx = row.name
+                original_idx = int(row.name[1]) - 1  # 다중 인덱스의 '순위' 값으로 원래 인덱스 추적
                 
                 # 행 짝수/홀수 구분 (스트라이프 배경으로 주식별 구분)
                 is_even = (original_idx % 2 == 0)
@@ -360,7 +364,7 @@ if not market_df.empty:
                 return styles
             
             styled_res = res.style.apply(highlight_eps_cols, axis=1)
-            st.dataframe(styled_res, use_container_width=True, hide_index=True)
+            st.dataframe(styled_res, use_container_width=True) # 고정된 인덱스를 보여주기 위해 hide_index=True 제거
         if len(st.session_state.skipped_results) > 0:
             with st.expander("🚫 분석 제외 종목", expanded=True):
                 dfS = pd.DataFrame(st.session_state.skipped_results).sort_values("시총순위")

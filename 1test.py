@@ -130,7 +130,7 @@ def safe_float(val):
 
 def analyze_stock(ticker, name, market, current_price, shares, marcap_rank, filters):
     is_pref = not str(ticker).endswith('0') or name.endswith('우') or '우(' in name or '우B' in name
-    if is_pref:
+    if is_pref and filters.get('pref', True):
         return None, {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "제외사유": "우선주 제외"}
     
     is_etf = any(k in name for k in ['KODEX', 'TIGER', 'KBSTAR', 'KINDEX', 'ARIRANG', 'KOSEF', 'HANARO', 'ACE', 'SOL', 'TIMEFOLIO', 'FOCUS', '마이티', 'TREX', '히어로즈', 'VITA']) or name.endswith('ETF')
@@ -141,7 +141,7 @@ def analyze_stock(ticker, name, market, current_price, shares, marcap_rank, filt
     url_fin = f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{ticker}"
     url_main = f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A{ticker}"
     
-    t_equity = 0.0; t_debt = 0.0; c_liab = 0.0; a_eps = 0.0; past_eps = 0.0; q_eps = 0.0; bps = 0.0; op_profit = 0.0; is_future_eps = False
+    t_equity = 0.0; t_debt = 0.0; c_liab = 0.0; a_eps = 0.0; past_eps = 0.0; q_eps = 0.0; bps = 0.0; past_bps = 0.0; op_profit = 0.0; is_future_eps = False
     try:
         res_fin = requests.get(url_fin, headers=headers, timeout=5)
         res_fin.encoding = 'utf-8'
@@ -188,11 +188,17 @@ def analyze_stock(ticker, name, market, current_price, shares, marcap_rank, filt
                             if len(annuals) > 1: past_eps = annuals[1][0]
                             else: past_eps = a_eps
                     elif 'BPS(원)' in nm and bps == 0:
+                        bps_annuals = []
                         for j in range(len(row)-1, 0, -1):
                             val = safe_float(row.iloc[j])
-                            if val is not None and ('Annual' in col_types[j] or 'NetQuarter' in col_types[j].replace(' ', '')):
-                                bps = val
-                                break
+                            if val is not None:
+                                if 'Annual' in col_types[j]:
+                                    bps_annuals.append(val)
+                                if bps == 0 and ('Annual' in col_types[j] or 'NetQuarter' in col_types[j].replace(' ', '')):
+                                    bps = val
+                        if bps_annuals:
+                            if len(bps_annuals) > 1: past_bps = bps_annuals[1]
+                            else: past_bps = bps_annuals[0]
                     elif '영업이익' in nm and op_profit == 0:
                         for j in range(len(row)-1, 0, -1):
                             val = safe_float(row.iloc[j])
@@ -212,18 +218,18 @@ def analyze_stock(ticker, name, market, current_price, shares, marcap_rank, filt
     t10 = (a_eps * 10) + bps - (c_liab / shares)
     t15 = (a_eps * 15) + bps - (c_liab / shares)
     
-    past_p10 = (past_eps * 10) + bps - pnlty
-    past_t10 = (past_eps * 10) + bps - (c_liab / shares)
-    past_t15 = (past_eps * 15) + bps - (c_liab / shares)
+    past_p10 = (past_eps * 10) + past_bps - pnlty
+    past_t10 = (past_eps * 10) + past_bps - (c_liab / shares)
+    past_t15 = (past_eps * 15) + past_bps - (c_liab / shares)
     
     reason = None
     if a_eps <= 0 and filters.get('eps_neg', True): reason = "적자 기업 (EPS < 0)"
     elif t10 <= 0 and filters.get('target_neg', True): reason = "목표주가 음수"
-    elif p10 <= 0 and filters.get('target_neg', True): reason = "적정주가 음수"
+    elif p10 <= 0 and filters.get('intrinsic_neg', True): reason = "적정주가 음수"
     elif (a_eps * 10) < bps and filters.get('eps10_bps', True): reason = "EPS*10 < BPS"
     elif op_profit < 0 and filters.get('op_neg', True): reason = "영업이익 적자"
     
-    data = {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "적정주가(10)": p10, "목표주가(10)": t10, "괴리율(10)": ((p10 - current_price) / current_price) * 100 if p10 > 0 else 0, "적정주가(15)": p15, "목표주가(15)": t15, "EPS": a_eps, "추정EPS여부": is_future_eps, "BPS": bps, "과거적정주가": past_p10, "과거목표주가(10)": past_t10, "과거목표주가(15)": past_t15, "부채비율(%)": d_ratio, "총부채_원": t_debt, "유동부채_원": c_liab, "총자본_원": t_equity, "상장주식수_원": shares}
+    data = {"시장": market, "시총순위": marcap_rank, "종목명": name, "현재주가": current_price, "적정주가(10)": p10, "목표주가(10)": t10, "괴리율(10)": ((p10 - current_price) / current_price) * 100 if p10 > 0 else 0, "적정주가(15)": p15, "목표주가(15)": t15, "EPS": a_eps, "추정EPS여부": is_future_eps, "BPS": bps, "과거적정주가": past_p10, "과거목표주가(10)": past_t10, "과거목표주가(15)": past_t15, "과거EPS": past_eps, "과거BPS": past_bps, "부채비율(%)": d_ratio, "총부채_원": t_debt, "유동부채_원": c_liab, "총자본_원": t_equity, "상장주식수_원": shares}
     if reason:
         data["제외사유"] = reason
         return (None, data)
@@ -247,12 +253,16 @@ if not market_df.empty:
             selected_custom = st.multiselect("종목 선택:", market_df['Name'].tolist())
 
     st.markdown("### 🔍 탐색 필터 (체크 시 분석에서 제외)")
-    col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
-    with col_f1: st.checkbox("목표주가 음수", value=True, key="filter_target_neg")
-    with col_f2: st.checkbox("EPS 음수", value=True, key="filter_eps_neg")
-    with col_f3: st.checkbox("EPS*10 < BPS", value=True, key="filter_eps10_bps")
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    with col_f1: st.checkbox("우선주", value=True, key="filter_pref")
+    with col_f2: st.checkbox("ETF 종목", value=True, key="filter_etf")
+    with col_f3: st.checkbox("적자기업 (EPS 음수)", value=True, key="filter_eps_neg")
     with col_f4: st.checkbox("영업이익 적자", value=True, key="filter_op_neg")
-    with col_f5: st.checkbox("ETF 종목", value=True, key="filter_etf")
+    
+    col_f5, col_f6, col_f7, _ = st.columns(4)
+    with col_f5: st.checkbox("목표주가 음수", value=True, key="filter_target_neg")
+    with col_f6: st.checkbox("적정주가 음수", value=True, key="filter_intrinsic_neg")
+    with col_f7: st.checkbox("EPS*10 < BPS", value=True, key="filter_eps10_bps")
 
     st.divider()
     
@@ -292,6 +302,11 @@ if not market_df.empty:
         def fmt_curr(v): return f"{v/1e8:,.1f}"
         if len(st.session_state.results) > 0:
             st.markdown("### 🏆 탐색 결과")
+            st.caption("""ℹ️ **주가 산출 시 데이터 기준 및 색상 안내**
+- **기본/검정색**: 현재 존재하는 실제 실적으로 산출됨.
+- **<span style='color:#cda8ff; font-weight:bold;'>보라색 표기</span>**: 예측치(미래 추정치)로 산출됨. 
+- **EPS 적용 방식**: 1순위로 미래 예측치(E)를 우선 반영하며, 예측치가 없을 경우에만 가장 최근 발표된 실제 연간 EPS를 사용합니다.
+- **BPS 적용 방식**: 예측치 여부와 무관하게, 가장 최근 발표된 연간 또는 최신 분기(NetQuarter) 실적 중 가장 최신의 값을 현재 BPS로 반영합니다.""", unsafe_allow_html=True)
             df = pd.DataFrame(st.session_state.results).sort_values("괴리율(10)", ascending=False).reset_index(drop=True)
             res = pd.DataFrame()
             res["시장"] = df.get("시장", "KOSPI"); res["순위"] = df.index+1; res["종목"] = df["종목명"]; res["시총순위"] = df["시총순위"]; res["현재주가(원)"] = df["현재주가"].apply(lambda x: f"{x:,.0f}")
@@ -299,6 +314,7 @@ if not market_df.empty:
             res["괴리율(10, %)"] = df["괴리율(10)"].apply(lambda x: f"{x:.2f}"); res["적정주가(15, 원)"] = df["적정주가(15)"].apply(lambda x: f"{x:,.0f}"); res["목표주가(15, 원)"] = df["목표주가(15)"].apply(lambda x: f"{x:,.0f}")
             res["EPS(원)"] = df["EPS"].apply(lambda x: f"{x:,.0f}"); res["BPS(원)"] = df["BPS"].apply(lambda x: f"{x:,.0f}")
             res["과거 적정주가"] = df["과거적정주가"].apply(lambda x: f"{x:,.0f}"); res["과거목표주가(10)"] = df["과거목표주가(10)"].apply(lambda x: f"{x:,.0f}"); res["과거목표주가(15)"] = df["과거목표주가(15)"].apply(lambda x: f"{x:,.0f}")
+            res["과거 EPS(원)"] = df.get("과거EPS", 0).apply(lambda x: f"{x:,.0f}"); res["과거 BPS(원)"] = df.get("과거BPS", 0).apply(lambda x: f"{x:,.0f}")
             res["부채비율(%)"] = df["부채비율(%)"].apply(lambda x: f"{x:.2f}")
             res["총부채(억원)"] = df["총부채_원"].apply(fmt_curr); res["유동부채(억원)"] = df["유동부채_원"].apply(fmt_curr); res["총자본(억원)"] = df["총자본_원"].apply(fmt_curr); res["주식수(만개)"] = df["상장주식수_원"].apply(lambda x: f"{x/1e4:,.0f}")
 
@@ -326,7 +342,9 @@ if not market_df.empty:
         for i, stock in enumerate(st.session_state.target_stocks[st.session_state.current_idx:], start=st.session_state.current_idx):
             prog.progress((i)/total); status_text.markdown(f"**진행중:** {i}/{total} ({stock['Name']})")
             filters = {
+                'pref': st.session_state.get('filter_pref', True),
                 'target_neg': st.session_state.get('filter_target_neg', True),
+                'intrinsic_neg': st.session_state.get('filter_intrinsic_neg', True),
                 'eps_neg': st.session_state.get('filter_eps_neg', True),
                 'eps10_bps': st.session_state.get('filter_eps10_bps', True),
                 'op_neg': st.session_state.get('filter_op_neg', True),

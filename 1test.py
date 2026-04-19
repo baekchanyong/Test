@@ -313,7 +313,8 @@ if not market_df.empty:
 - **BPS 적용 방식**: 예측치 여부와 무관하게, 가장 최근 발표된 연간 또는 최신 분기(NetQuarter) 실적 중 가장 최신의 값을 현재 BPS로 반영합니다.""", unsafe_allow_html=True)
             df = pd.DataFrame(st.session_state.results).sort_values("괴리율(10)", ascending=False).reset_index(drop=True)
             res = pd.DataFrame()
-            res["시장"] = df.get("시장", "KOSPI"); res["순위"] = df.index+1; res["종목"] = df["종목명"]; res["시총순위"] = df["시총순위"]; res["현재주가(원)"] = df["현재주가"].apply(lambda x: f"{x:,.0f}")
+            res["순위 및 종목명\xa0\xa0\xa0\xa0\xa0\xa0"] = (df.index + 1).astype(str) + ". " + df["종목명"]
+            res["시장"] = df.get("시장", "KOSPI"); res["시총순위"] = df["시총순위"]; res["현재주가(원)"] = df["현재주가"].apply(lambda x: f"{x:,.0f}")
             res["적정주가(10, 원)"] = df["적정주가(10)"].apply(lambda x: f"{x:,.0f}"); res["목표주가(10, 원)"] = df["목표주가(10)"].apply(lambda x: f"{x:,.0f}")
             res["괴리율(10, %)"] = df["괴리율(10)"].apply(lambda x: f"{x:.2f}"); res["적정주가(15, 원)"] = df["적정주가(15)"].apply(lambda x: f"{x:,.0f}"); res["목표주가(15, 원)"] = df["목표주가(15)"].apply(lambda x: f"{x:,.0f}")
             res["EPS(원)"] = df["EPS"].apply(lambda x: f"{x:,.0f}"); res["BPS(원)"] = df["BPS"].apply(lambda x: f"{x:,.0f}")
@@ -322,12 +323,12 @@ if not market_df.empty:
             res["부채비율(%)"] = df["부채비율(%)"].apply(lambda x: f"{x:.2f}")
             res["총부채(억원)"] = df["총부채_원"].apply(fmt_curr); res["유동부채(억원)"] = df["유동부채_원"].apply(fmt_curr); res["총자본(억원)"] = df["총자본_원"].apply(fmt_curr); res["주식수(만개)"] = df["상장주식수_원"].apply(lambda x: f"{x/1e4:,.0f}")
 
-            # 가로 횡스크롤 시 좌측에 고정되도록 인덱스 설정
-            res = res.set_index(["시장", "순위", "종목"])
+            # 가로 횡스크롤 시 좌측에 고정되도록 인덱스 설정 (모바일 스크롤 멈춤 버그 방지를 위해 단일 인덱스 사용)
+            res = res.set_index("순위 및 종목명\xa0\xa0\xa0\xa0\xa0\xa0")
 
             def highlight_eps_cols(row):
                 styles = [''] * len(row)
-                original_idx = int(row.name[1]) - 1  # 다중 인덱스의 '순위' 값으로 원래 인덱스 추적
+                original_idx = int(str(row.name).split('.')[0]) - 1  # 단일 인덱스에서 '순위' 값 파싱하여 원래 인덱스 추적
                 
                 # 행 짝수/홀수 구분 (스트라이프 배경으로 주식별 구분)
                 is_even = (original_idx % 2 == 0)
